@@ -1,0 +1,5 @@
+{
+  "name": "DermaGen AI",
+  "description": "A visual editor for Garry's Mod Derma (GLua) interfaces, powered by Gemini for text-to-UI generation.",
+  "requestFramePermissions": []
+}
