@@ -1,12 +1,16 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ComponentType, EditorState, UIElement, ViewState } from './types';
 import Sidebar from './components/Sidebar';
 import PropertiesPanel from './components/PropertiesPanel';
 import Canvas from './components/Canvas';
 import Toolbar from './components/Toolbar';
+import MenuBar from './components/MenuBar';
+import MethodsMenu from './components/MethodsMenu';
+import LayoutPanel from './components/LayoutPanel';
 import { generateLuaCode } from './utils/luaGenerator';
+import { parseLuaToState } from './utils/luaParser';
 import { generateLayoutFromPrompt } from './services/gemini';
-import { Copy, Terminal, Undo2, Redo2, Grid, ChevronDown, ChevronUp } from 'lucide-react';
+import { Copy, Terminal, Undo2, Redo2, Grid, ChevronDown, ChevronUp, ScrollText } from 'lucide-react';
 
 const initialState: EditorState = {
   elements: {},
@@ -33,6 +37,13 @@ const App: React.FC = () => {
   const [generatedCode, setGeneratedCode] = useState<string>('');
   const [isGeneratingAI, setIsGeneratingAI] = useState(false);
   const [isOutputCollapsed, setIsOutputCollapsed] = useState(false);
+  const [isMethodsMenuOpen, setIsMethodsMenuOpen] = useState(false);
+  const [isLayoutOpen, setIsLayoutOpen] = useState(false);
+  const [currentFileName, setCurrentFileName] = useState<string>("project.json");
+  
+  // Hidden inputs for file operations
+  const openFileRef = useRef<HTMLInputElement>(null);
+  const importLuaRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const savedState = localStorage.getItem('dermaGenState');
@@ -69,7 +80,98 @@ const App: React.FC = () => {
     if (historyIndex < history.length - 1) setHistoryIndex(historyIndex + 1);
   };
 
-  // State modification helpers
+  // --- FILE OPERATIONS ---
+
+  const handleNew = () => {
+    if (confirm("Create new project? Unsaved changes will be lost.")) {
+      pushState(initialState);
+      setCurrentFileName("project.json");
+    }
+  };
+
+  const handleOpenClick = () => {
+    if (openFileRef.current) openFileRef.current.click();
+  };
+
+  const handleFileOpen = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const json = JSON.parse(event.target?.result as string);
+        // Basic validation
+        if (json.elements && typeof json.elements === 'object') {
+           pushState(json);
+           setCurrentFileName(file.name);
+        } else {
+           alert("Invalid project file format.");
+        }
+      } catch (err) {
+        alert("Failed to parse project file.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // Reset
+  };
+
+  const downloadFile = (content: string, filename: string, type: string) => {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleSave = () => {
+    downloadFile(JSON.stringify(currentState, null, 2), currentFileName, 'application/json');
+  };
+
+  const handleSaveAs = () => {
+    const name = prompt("Enter filename:", currentFileName);
+    if (name) {
+      const finalName = name.endsWith('.json') ? name : `${name}.json`;
+      setCurrentFileName(finalName);
+      downloadFile(JSON.stringify(currentState, null, 2), finalName, 'application/json');
+    }
+  };
+
+  const handleExport = () => {
+    const name = currentFileName.replace('.json', '.lua');
+    downloadFile(generatedCode, name, 'text/plain');
+  };
+
+  const handleImportClick = () => {
+     if (importLuaRef.current) importLuaRef.current.click();
+  };
+
+  const handleLuaImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const code = event.target?.result as string;
+      const newState = parseLuaToState(code);
+      if (newState) {
+          if (confirm("Import successful. This will overwrite current canvas. Proceed?")) {
+              pushState(newState);
+          }
+      } else {
+          alert("Could not parse Lua code. Ensure it follows standard vgui.Create patterns.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  // --- STATE MODIFIERS ---
+
   const addComponent = (type: ComponentType) => {
     if (!currentState.rootId && type !== ComponentType.DFrame) {
       alert("You must add a DFrame first.");
@@ -88,6 +190,7 @@ const App: React.FC = () => {
     if (type === ComponentType.DFrame) { w = 600; h = 400; }
     else if (type === ComponentType.DPanel) { w = 200; h = 200; }
     else if (type === ComponentType.DCheckBox) { w = 100; h = 20; }
+    else if (type === ComponentType.DListView) { w = 200; h = 150; }
     
     const newElement: UIElement = {
       id,
@@ -137,6 +240,10 @@ const App: React.FC = () => {
     newHistory[historyIndex] = newState;
     setHistory(newHistory);
   }, [currentState, history, historyIndex]);
+
+  const updateMethods = (id: string, methods: Record<string, string>) => {
+      updateComponent(id, { methods });
+  };
 
   const reparentComponent = useCallback((id: string, newParentId: string | null) => {
     if (!newParentId) return; // Only allowing parenting to existing elements for now
@@ -311,6 +418,16 @@ const App: React.FC = () => {
             e.preventDefault();
             duplicateElement();
         }
+        // Save
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+            e.preventDefault();
+            handleSave();
+        }
+        // Open
+        if ((e.ctrlKey || e.metaKey) && e.key === 'o') {
+            e.preventDefault();
+            handleOpenClick();
+        }
         // Delete
         if (e.key === 'Delete' && currentState.selectedId) {
             deleteComponent(currentState.selectedId);
@@ -318,12 +435,46 @@ const App: React.FC = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [historyIndex, history, currentState, duplicateElement]);
+  }, [historyIndex, history, currentState, duplicateElement, handleSave, handleOpenClick]);
 
   return (
     <div className="flex flex-col h-screen w-screen bg-neutral-950 text-white font-sans selection:bg-blue-500/30">
+      <MenuBar 
+        onNew={handleNew}
+        onOpen={handleOpenClick}
+        onSave={handleSave}
+        onSaveAs={handleSaveAs}
+        onImport={handleImportClick}
+        onExport={handleExport}
+        onUndo={undo}
+        onRedo={redo}
+        onDelete={() => currentState.selectedId && deleteComponent(currentState.selectedId)}
+        onDuplicate={duplicateElement}
+        onToggleLayout={() => setIsLayoutOpen(!isLayoutOpen)}
+        isLayoutOpen={isLayoutOpen}
+        canUndo={historyIndex > 0}
+        canRedo={historyIndex < history.length - 1}
+        hasSelection={!!currentState.selectedId}
+      />
+
+      <input 
+        type="file" 
+        accept=".json" 
+        ref={openFileRef} 
+        onChange={handleFileOpen} 
+        className="hidden" 
+      />
+      <input 
+        type="file" 
+        accept=".lua,.txt" 
+        ref={importLuaRef} 
+        onChange={handleLuaImport} 
+        className="hidden" 
+      />
+
       <Toolbar onClear={clearCanvas} onGenerateAI={handleAIGeneration} isGenerating={isGeneratingAI} />
       
+      {/* Secondary Toolbar (History, Grid, Methods) */}
       <div className="h-10 bg-neutral-900 border-b border-neutral-800 flex items-center px-4 justify-between shrink-0">
          <div className="flex items-center space-x-2">
             <button onClick={undo} disabled={historyIndex === 0} className="p-1.5 text-neutral-400 hover:text-white disabled:opacity-30 rounded hover:bg-neutral-800" title="Undo (Ctrl+Z)"><Undo2 className="w-4 h-4" /></button>
@@ -339,11 +490,22 @@ const App: React.FC = () => {
                     className="w-12 bg-neutral-800 border border-neutral-700 rounded px-1 py-0.5 text-xs text-white"
                 />
             </div>
+            
+            <div className="w-px h-4 bg-neutral-700 mx-2"></div>
+            
+            <button 
+                onClick={() => setIsMethodsMenuOpen(true)}
+                disabled={!currentState.selectedId}
+                className="flex items-center gap-2 px-3 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+                <ScrollText className="w-3.5 h-3.5" />
+                <span className="text-xs font-medium">Methods</span>
+            </button>
          </div>
-         <span className="text-xs text-neutral-500">{historyIndex === history.length - 1 ? 'Saved' : 'Unsaved'}</span>
+         <span className="text-xs text-neutral-500">{currentFileName} {historyIndex === history.length - 1 ? '(Saved)' : '(Modified)'}</span>
       </div>
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden relative">
         <Sidebar onAddComponent={addComponent} />
         
         {/* Middle Column: Canvas + Lua Output */}
@@ -354,6 +516,7 @@ const App: React.FC = () => {
                 onSelect={selectComponent}
                 onUpdateElement={updateComponent}
                 onViewChange={setViewState}
+                onDeleteElement={deleteComponent}
             />
             
             {/* Lua Output Panel */}
@@ -384,6 +547,16 @@ const App: React.FC = () => {
                     <pre className="text-[11px] font-mono text-green-400/90 whitespace-pre-wrap break-all leading-relaxed">{generatedCode}</pre>
                 </div>
             </div>
+
+            {/* Floating Layout Panel */}
+            <LayoutPanel 
+                elements={currentState.elements} 
+                rootId={currentState.rootId} 
+                selectedId={currentState.selectedId} 
+                onSelect={selectComponent}
+                isOpen={isLayoutOpen}
+                onClose={() => setIsLayoutOpen(false)}
+            />
         </div>
         
         {/* Right Column: Properties */}
@@ -408,6 +581,15 @@ const App: React.FC = () => {
              </div>
         </div>
       </div>
+
+      {currentState.selectedId && currentState.elements[currentState.selectedId] && (
+          <MethodsMenu 
+            element={currentState.elements[currentState.selectedId]}
+            isOpen={isMethodsMenuOpen}
+            onClose={() => setIsMethodsMenuOpen(false)}
+            onSave={updateMethods}
+          />
+      )}
     </div>
   );
 };

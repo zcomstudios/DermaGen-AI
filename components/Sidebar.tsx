@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { ComponentType } from '../types';
-import { LayoutTemplate, Square, Type, MousePointer2, CheckSquare, SquareAsterisk, Box, Search, List, Table, Image as ImageIcon, Layers, ChevronDown } from 'lucide-react';
+import { LayoutTemplate, Square, Type, MousePointer2, CheckSquare, SquareAsterisk, Box, Search, List, Table, Image as ImageIcon, Layers, ChevronDown, Folder, FormInput, Cuboid } from 'lucide-react';
 
 interface SidebarProps {
   onAddComponent: (type: ComponentType) => void;
@@ -19,6 +19,9 @@ const COMPONENT_INFO: Partial<Record<ComponentType, { desc: string, icon: any }>
   [ComponentType.DGrid]: { desc: "Arranges items in a grid layout.", icon: Table },
   [ComponentType.DImage]: { desc: "Displays an image or material.", icon: ImageIcon },
   [ComponentType.DPropertySheet]: { desc: "A tabbed container for switching views.", icon: Layers },
+  [ComponentType.DTab]: { desc: "A tab page for a PropertySheet.", icon: Folder },
+  [ComponentType.DForm]: { desc: "A container form for inputs.", icon: FormInput },
+  [ComponentType.DModelPanel]: { desc: "Displays a 3D model.", icon: Cuboid },
 };
 
 const Sidebar: React.FC<SidebarProps> = ({ onAddComponent }) => {

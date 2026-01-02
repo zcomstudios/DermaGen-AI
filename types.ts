@@ -1,3 +1,4 @@
+
 export enum ComponentType {
   DFrame = 'DFrame',
   DButton = 'DButton',
@@ -34,7 +35,8 @@ export enum ComponentType {
   DTooltip = 'DTooltip',
   DVerticalDivider = 'DVerticalDivider',
   DNumberWang = 'DNumberWang',
-  DBevel = 'DBevel'
+  DBevel = 'DBevel',
+  DTab = 'DTab'
 }
 
 export interface ComponentProps {
@@ -56,16 +58,45 @@ export interface ComponentProps {
   borderRadius?: number;
   opacity?: number; // 0-255
 
+  // Enhanced Hover
+  hoverOpacity?: number; // 0-255
+  hoverBorderColor?: string;
+
+  // Text Shadow
+  textShadow?: boolean;
+  textShadowColor?: string;
+  textShadowOffset?: number;
+
+  // Layout
+  layoutMode?: 'none' | 'vertical' | 'horizontal';
+  layoutSpacing?: number;
+  layoutPadding?: number;
+
   // Effects
   hoverScale?: number; // Multiplier, e.g. 1.1
 
   // Image
   imageUrl?: string;
+  imageColor?: string; // Tint color
 
   // Font
   fontFamily?: string;
   fontSize?: number;
   fontWeight?: number;
+
+  // Model Panel
+  modelPath?: string;
+  modelFov?: number;
+
+  // DFrame Specifics
+  titleBarColor?: string;
+  draggable?: boolean;
+  sizable?: boolean;
+  showCloseButton?: boolean;
+  deleteOnClose?: boolean;
+
+  // Logic
+  methods?: Record<string, string>; // methodName -> code body
 }
 
 export interface UIElement {

@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { EditorState, UIElement, ComponentType, ViewState } from '../types';
-import { ZoomIn, ZoomOut, Grid as GridIcon, ImageOff } from 'lucide-react';
+import { ZoomIn, ZoomOut, Grid as GridIcon, ImageOff, Cuboid } from 'lucide-react';
 
 interface CanvasProps {
   state: EditorState;
@@ -8,9 +8,10 @@ interface CanvasProps {
   onSelect: (id: string | null) => void;
   onUpdateElement: (id: string, updates: Partial<UIElement['props']>) => void;
   onViewChange: (newView: ViewState) => void;
+  onDeleteElement?: (id: string) => void;
 }
 
-const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateElement, onViewChange }) => {
+const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateElement, onViewChange, onDeleteElement }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [isPanning, setIsPanning] = useState(false);
   const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
@@ -76,6 +77,10 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
   }, [isPanning, lastMousePos, viewState, onViewChange]);
 
   const renderResizeHandles = (el: UIElement) => {
+      // Don't show handles if element is in an auto-layout container
+      const parent = el.parentId ? state.elements[el.parentId] : null;
+      if (parent && parent.props.layoutMode && parent.props.layoutMode !== 'none') return null;
+
       const handles = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
       const size = 8 / viewState.zoom;
       
@@ -151,18 +156,25 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
 
       // Dynamic styles based on props
       const bgColor = (isHovered && el.props.hoverColor) ? el.props.hoverColor : el.props.color;
+      const borderColor = (isHovered && el.props.hoverBorderColor) ? el.props.hoverBorderColor : el.props.borderColor;
+      const opacity = (isHovered && el.props.hoverOpacity !== undefined) ? el.props.hoverOpacity / 255 : (el.props.opacity !== undefined ? el.props.opacity / 255 : 1);
       
+      const textShadowStyle = (el.props.textShadow && el.props.textShadowColor) 
+          ? `${el.props.textShadowOffset || 1}px ${el.props.textShadowOffset || 1}px 0px ${el.props.textShadowColor}`
+          : undefined;
+
       const commonStyle: React.CSSProperties = {
           backgroundColor: bgColor,
-          borderColor: el.props.borderColor || 'transparent',
+          borderColor: borderColor || 'transparent',
           borderWidth: el.props.borderWidth ? `${el.props.borderWidth}px` : '0px',
           borderStyle: (el.props.borderWidth && el.props.borderWidth > 0) ? 'solid' : 'none',
           borderRadius: el.props.borderRadius ? `${el.props.borderRadius}px` : '0px',
           justifyContent: el.props.textAlign === 'center' ? 'center' : el.props.textAlign === 'right' ? 'flex-end' : 'flex-start',
-          opacity: el.props.opacity !== undefined ? el.props.opacity / 255 : 1,
+          opacity: opacity,
           fontFamily: el.props.fontFamily || 'Arial, sans-serif',
           fontSize: el.props.fontSize ? `${el.props.fontSize}px` : undefined,
           fontWeight: el.props.fontWeight,
+          textShadow: textShadowStyle,
       };
 
       const titleBarStyle: React.CSSProperties = {
@@ -173,16 +185,29 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
 
       switch (el.type) {
           case ComponentType.DFrame:
+              const titleColor = el.props.titleBarColor || '#2a2a2a';
               return (
                   <div 
-                      className="flex flex-col h-full w-full bg-[#323232] rounded-t-sm shadow-xl border border-black/50"
-                      style={{ ...commonStyle, backgroundColor: bgColor || '#323232' }}
+                      className="flex flex-col h-full w-full bg-[#323232] shadow-xl"
+                      style={{ ...commonStyle, backgroundColor: bgColor || '#323232', overflow: 'hidden' }}
                   >
-                      <div className="h-6 bg-[#2a2a2a] flex items-center px-2 border-b border-black/40 shrink-0">
+                      <div 
+                        className="h-6 flex items-center px-2 border-b border-black/40 shrink-0 dframe-titlebar"
+                        style={{ backgroundColor: titleColor }}
+                      >
                           <span className={`${baseText} text-white/90 font-bold`} style={titleBarStyle}>{el.props.text || 'DFrame'}</span>
                           <div className="ml-auto flex gap-1 opacity-60">
                               <div className="w-3 h-3 bg-white/10 rounded-sm hover:bg-white/20"></div>
-                              <div className="w-3 h-3 bg-white/10 rounded-sm hover:bg-red-500/80"></div>
+                              {el.props.showCloseButton !== false && (
+                                <div 
+                                    className="w-3 h-3 bg-white/10 rounded-sm hover:bg-red-500/80 cursor-pointer pointer-events-auto"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (onDeleteElement) onDeleteElement(el.id);
+                                    }}
+                                    title="Close"
+                                ></div>
+                              )}
                           </div>
                       </div>
                       <div className="flex-1 relative overflow-hidden bg-transparent">
@@ -220,17 +245,36 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
               );
 
           case ComponentType.DLabel:
+               // Simple font mapping for visualization
+               let fontStyle = commonStyle.fontFamily;
+               let fontWeight = commonStyle.fontWeight;
+               let fontSize = commonStyle.fontSize;
+               if (fontStyle === 'DermaDefault') { fontStyle = 'Arial, sans-serif'; fontSize = '13px'; }
+               if (fontStyle === 'DermaDefaultBold') { fontStyle = 'Arial, sans-serif'; fontWeight = 700; fontSize = '13px'; }
+               if (fontStyle === 'DermaLarge') { fontStyle = 'Arial, sans-serif'; fontWeight = 700; fontSize = '18px'; }
+               if (fontStyle === 'ChatFont') { fontStyle = 'Verdana, sans-serif'; fontSize = '14px'; }
+
                return (
-                  <div className="w-full h-full flex items-center" style={{ ...commonStyle, backgroundColor: 'transparent', border: 'none' }}>
-                       <span className={`${baseText} text-white`} style={commonStyle}>{el.props.text || 'Label'}</span>
+                  <div className="w-full h-full flex items-center" style={{ ...commonStyle, fontFamily: fontStyle, fontWeight, fontSize, backgroundColor: 'transparent', border: 'none' }}>
+                       <span className={`${baseText} text-white`} style={{...commonStyle, fontFamily: fontStyle, fontWeight, fontSize}}>{el.props.text || 'Label'}</span>
                   </div>
                );
                
           case ComponentType.DImage:
               return (
-                  <div className="w-full h-full overflow-hidden" style={commonStyle}>
+                  <div className="w-full h-full overflow-hidden relative" style={commonStyle}>
                       {el.props.imageUrl ? (
-                          <img src={el.props.imageUrl} alt="DImage" className="w-full h-full object-cover pointer-events-none" />
+                          <>
+                            {/* Wrapper for tinting using blend mode */}
+                            <div className="absolute inset-0 z-0" style={{ backgroundColor: el.props.imageColor || 'transparent' }}>
+                                <img 
+                                    src={el.props.imageUrl} 
+                                    alt="DImage" 
+                                    className="w-full h-full object-cover pointer-events-none" 
+                                    style={{ mixBlendMode: el.props.imageColor ? 'multiply' : 'normal' }}
+                                />
+                            </div>
+                          </>
                       ) : (
                           <div className="w-full h-full flex flex-col items-center justify-center bg-neutral-800 text-neutral-600 border border-dashed border-neutral-700">
                              <ImageOff className="w-6 h-6 mb-1 opacity-50" />
@@ -239,8 +283,32 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
                       )}
                   </div>
               );
+          
+          case ComponentType.DModelPanel:
+              return (
+                  <div className="w-full h-full bg-[#1a1a1a] border border-neutral-700 flex flex-col items-center justify-center relative overflow-hidden" style={commonStyle}>
+                       <Cuboid className="w-8 h-8 text-neutral-600 mb-2 opacity-50" />
+                       <span className="text-[9px] text-neutral-500 font-mono text-center px-1 break-all">{el.props.modelPath || "No Model"}</span>
+                       <div className="absolute top-1 right-1 text-[8px] text-neutral-600">3D</div>
+                  </div>
+              );
+              
+          case ComponentType.DForm:
+              return (
+                  <div className="w-full h-full bg-white flex flex-col border border-neutral-400 rounded-sm" style={commonStyle}>
+                       <div className="bg-neutral-200 border-b border-neutral-300 px-2 py-1">
+                           <span className="text-black text-[10px] font-bold">{el.props.text || "Form"}</span>
+                       </div>
+                       <div className="flex-1 bg-white p-1">
+                           {/* Form content goes here */}
+                       </div>
+                  </div>
+              );
 
           case ComponentType.DPanel:
+          case ComponentType.DScrollPanel:
+          case ComponentType.DTab: 
+          // DTab usually renders as a panel inside the sheet content area
               return (
                   <div 
                     className="w-full h-full bg-[#383838] border border-black/30" 
@@ -254,6 +322,56 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
                   <div className="w-full h-full bg-[#505050] border border-black/50 flex items-center justify-between px-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]" style={commonStyle}>
                       <span className={`${baseText} text-white`}>{el.props.text || 'Select...'}</span>
                       <div className="w-0 h-0 border-l-[4px] border-l-transparent border-r-[4px] border-r-transparent border-t-[5px] border-t-white/80"></div>
+                  </div>
+              );
+          
+          case ComponentType.DPropertySheet:
+              return (
+                  <div className="w-full h-full bg-[#383838] flex flex-col" style={commonStyle}>
+                      {/* Fake Tab Bar */}
+                      <div className="flex px-1 pt-1 gap-1 overflow-hidden">
+                          {/* Render fake tabs based on children DTabs */}
+                          {el.children.map(childId => {
+                               const child = state.elements[childId];
+                               if (child.type === ComponentType.DTab) {
+                                   return (
+                                       <div key={childId} className="bg-[#f0f0f0] text-black text-[10px] px-2 py-0.5 rounded-t-sm border-t border-l border-r border-neutral-400 flex items-center gap-1">
+                                           {child.props.imageUrl && <div className="w-3 h-3 bg-neutral-400 rounded-full" />}
+                                           {child.props.text || "Tab"}
+                                       </div>
+                                   );
+                               }
+                               return null;
+                          })}
+                          {el.children.filter(c => state.elements[c].type === ComponentType.DTab).length === 0 && (
+                              <div className="bg-[#f0f0f0] text-black text-[10px] px-2 py-0.5 rounded-t-sm border-t border-l border-r border-neutral-400 opacity-50">Empty Sheet</div>
+                          )}
+                      </div>
+                      <div className="flex-1 bg-[#f0f0f0] border border-neutral-400 rounded-b-sm m-1 mt-0 relative p-1">
+                          {/* Children area for sheet content */}
+                      </div>
+                  </div>
+              );
+
+          case ComponentType.DListView:
+              return (
+                  <div className="w-full h-full bg-white border border-neutral-400 flex flex-col shadow-inner" style={{ ...commonStyle, backgroundColor: 'white' }}>
+                      {/* Header */}
+                      <div className="h-5 bg-gradient-to-b from-[#f0f0f0] to-[#d0d0d0] border-b border-[#a0a0a0] flex">
+                          <div className="flex-1 border-r border-[#a0a0a0] px-1 flex items-center">
+                              <span className="text-[10px] text-black/80 font-medium">Column 1</span>
+                          </div>
+                          <div className="flex-1 px-1 flex items-center">
+                               <span className="text-[10px] text-black/80 font-medium">Column 2</span>
+                          </div>
+                      </div>
+                      {/* Rows */}
+                      <div className="flex-1 bg-white flex flex-col">
+                           <div className="flex h-4 hover:bg-[#3399FF] hover:text-white group text-black">
+                               <div className="flex-1 px-1 flex items-center truncate text-[10px]">Item A</div>
+                               <div className="flex-1 px-1 flex items-center truncate text-[10px]">Detail A</div>
+                           </div>
+                      </div>
                   </div>
               );
 
@@ -272,26 +390,67 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
 
     const isSelected = state.selectedId === id;
     const isHovered = hoveredId === id;
+    const parent = el.parentId ? state.elements[el.parentId] : null;
+    const isAutoLayout = parent?.props.layoutMode && parent.props.layoutMode !== 'none';
     
+    // Check if element is a Tab inside a PropertySheet
+    const isTabInSheet = el.type === ComponentType.DTab && parent?.type === ComponentType.DPropertySheet;
+
     // Apply Scale Transform if Hovered
     const scale = (isHovered && el.props.hoverScale) ? el.props.hoverScale : 1;
+    
+    // Simulate Dock behavior:
+    const layoutWidth = (isAutoLayout && parent?.props.layoutMode === 'vertical') ? '100%' : el.props.w;
+    const layoutHeight = (isAutoLayout && parent?.props.layoutMode === 'horizontal') ? '100%' : el.props.h;
 
-    const style: React.CSSProperties = {
-      position: 'absolute',
-      left: el.props.x,
-      top: el.props.y,
-      width: el.props.w,
-      height: el.props.h,
+    // DForm header fix: Auto-layout usually, but we want it to look like a form
+    // If it's DForm, children stack vertically by default in GMod (DForm inherits DCollapsibleCategory/Panel which layouts children)
+    // We can force auto-layout visual for DForm children if we want, but user controls it via props.
+    
+    let finalStyle: React.CSSProperties = {
+      position: (isAutoLayout || isTabInSheet) ? 'relative' : 'absolute',
+      left: (isAutoLayout || isTabInSheet) ? undefined : el.props.x,
+      top: (isAutoLayout || isTabInSheet) ? undefined : el.props.y,
+      width: isTabInSheet ? '100%' : layoutWidth,
+      height: isTabInSheet ? '100%' : layoutHeight,
       zIndex: isSelected ? 10 : 1,
       transform: scale !== 1 ? `scale(${scale})` : undefined,
       transition: 'transform 0.1s ease-out',
-      transformOrigin: 'center center'
+      transformOrigin: 'center center',
+      flexShrink: 0 
     };
-
+    
+    // DPropertySheet Children Handling
+    // If element is DPropertySheet, its children (DTabs) should be rendered inside the content area.
+    // We override children container style for PropertySheet.
+    if (el.type === ComponentType.DPropertySheet) {
+        // We need to target the content area div which is the second child of the main render
+        // But here we wrap children. 
+        // We will just let them render in the flow of the container div we created in renderVGUIContent?
+        // No, renderVGUIContent returns a specific structure.
+        // We need to Portal them? Or just use CSS grid/absolute?
+        // Simplest: renderVGUIContent renders the *frame*, this children loop renders the contents.
+        // We use absolute positioning for children inside the padding area.
+    }
+    
     const handleMouseDown = (e: React.MouseEvent) => {
       e.stopPropagation();
       onSelect(id);
       
+      if (isAutoLayout || isTabInSheet) return; 
+
+      // If DFrame, check if we clicked the title bar for dragging
+      if (el.type === ComponentType.DFrame) {
+         // Get the click position relative to the element
+         const rect = e.currentTarget.getBoundingClientRect();
+         const relativeY = e.clientY - rect.top;
+         
+         // Standard DFrame title bar height is around 24px
+         if (relativeY > 24) {
+             return; // Don't drag if not on title bar
+         }
+      }
+
       const startX = e.clientX;
       const startY = e.clientY;
       const startLeft = el.props.x;
@@ -316,10 +475,52 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
       document.addEventListener('mouseup', handleMouseUp);
     };
 
+    // Calculate layout style for children container
+    const childrenContainerStyle: React.CSSProperties = {
+        position: 'relative',
+        width: '100%',
+        height: '100%',
+        pointerEvents: 'auto',
+        // Auto Layout Flexbox Logic
+        display: el.props.layoutMode && el.props.layoutMode !== 'none' ? 'flex' : 'block',
+        flexDirection: el.props.layoutMode === 'horizontal' ? 'row' : 'column',
+        gap: el.props.layoutSpacing ? `${el.props.layoutSpacing}px` : undefined,
+        padding: el.props.layoutPadding ? `${el.props.layoutPadding}px` : undefined,
+        overflowY: el.type === ComponentType.DScrollPanel ? 'auto' : 'hidden',
+        overflowX: 'hidden'
+    };
+    
+    // DPropertySheet Children Handling
+    if (el.type === ComponentType.DPropertySheet) {
+        childrenContainerStyle.position = 'absolute';
+        childrenContainerStyle.top = '24px'; // Below tab bar
+        childrenContainerStyle.left = '4px';
+        childrenContainerStyle.right = '4px';
+        childrenContainerStyle.bottom = '4px';
+        childrenContainerStyle.width = 'auto';
+        childrenContainerStyle.height = 'auto';
+        childrenContainerStyle.overflow = 'hidden';
+    }
+    
+    // DForm Children Handling
+    if (el.type === ComponentType.DForm) {
+        childrenContainerStyle.position = 'absolute';
+        childrenContainerStyle.top = '24px'; // Below label
+        childrenContainerStyle.left = '4px';
+        childrenContainerStyle.right = '4px';
+        childrenContainerStyle.bottom = '4px';
+        childrenContainerStyle.width = 'auto';
+        childrenContainerStyle.height = 'auto';
+        // Force vertical layout for DForm typically
+        childrenContainerStyle.display = 'flex';
+        childrenContainerStyle.flexDirection = 'column';
+        childrenContainerStyle.gap = '5px';
+    }
+
     return (
       <div 
         key={id}
-        style={style}
+        style={finalStyle}
         onMouseDown={handleMouseDown}
         onMouseEnter={() => setHoveredId(id)}
         onMouseLeave={() => setHoveredId(null)}
@@ -329,7 +530,7 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
         {renderVGUIContent(el, isSelected)}
         
         <div className={`absolute inset-0 pointer-events-none ${el.type === ComponentType.DFrame ? 'top-6' : ''}`}>
-             <div className="relative w-full h-full pointer-events-auto">
+             <div style={childrenContainerStyle} className="custom-scrollbar">
                  {el.children.map(childId => renderElement(childId))}
              </div>
         </div>
