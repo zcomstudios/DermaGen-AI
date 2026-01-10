@@ -46,11 +46,6 @@ const MethodsMenu: React.FC<MethodsMenuProps> = ({ element, isOpen, onClose, onS
       }
   }, [code, selectedMethod]); // Dependency on code means every keystroke updates history. For a text editor, usually we debounce.
 
-  // Optimization: Only push history on blur or after delay? 
-  // For simplicity satisfying the prompt, we keep it simple or implement debounced updates if feasible.
-  // Actually, capturing every keystroke in React state history is expensive. 
-  // Let's rely on standard textarea behavior for minor changes, but if the user wants explicit "Undo" button support, we need to manage it.
-  
   const handleUndo = () => {
       if (historyIndex > 0) {
           isUndoRedoAction.current = true;
@@ -69,7 +64,8 @@ const MethodsMenu: React.FC<MethodsMenuProps> = ({ element, isOpen, onClose, onS
 
   const getStub = (name: string) => {
       switch (name) {
-          case 'Paint': return `    if self:IsHovered() then
+          case 'Paint': return `    -- Arguments: self, w, h
+    if self:IsHovered() then
         draw.RoundedBox(0, 0, 0, w, h, Color(220, 220, 220, 255))
     else
         draw.RoundedBox(0, 0, 0, w, h, Color(255, 255, 255, 255))
@@ -85,13 +81,40 @@ const MethodsMenu: React.FC<MethodsMenuProps> = ({ element, isOpen, onClose, onS
     elseif keyCode == MOUSE_RIGHT then
         print("Right clicked on " .. tostring(self))
     end`;
+          case 'OnMouseReleased': return `    -- Arguments: self, keyCode
+    print("Mouse released:", keyCode)`;
+          case 'OnMouseDoubleClick': return `-- print("Double click on", self)`;
+          case 'OnCursorEntered': return `    -- Called when cursor enters the panel
+    print("Cursor entered " .. tostring(self))`;
+          case 'OnCursorExited': return `    -- Called when cursor leaves the panel
+    print("Cursor exited " .. tostring(self))`;
           case 'OnRemove': return `    -- Cleanup code when the panel is removed
     print("Panel removed:", self)`;
           case 'OnDragDrop': return `-- local droppedPanel = data
 -- Handle drag and drop logic here`;
           case 'SetKeyboardInput': return `-- self:SetKeyboardInputEnabled(b)`;
-          case 'OnMouseDoubleClick': return `-- print("Double click on", self)`;
           case 'OnDraw': return `-- Custom drawing logic here`;
+          case 'GetSize': return `    -- Return the element's width and height
+    return self:GetWide(), self:GetTall()`;
+          case 'GetWide': return `    -- Return the element's width
+    return self:GetWide()`;
+          case 'SetSize': return `    -- Update the element's width and height
+    self:SetSize(w, h)`;
+          case 'SetPos': return `    -- Update the element's position
+    self:SetPos(x, y)`;
+          case 'SetText': return `    -- Set the text of the element
+    self:SetText(text)`;
+          case 'SetChecked': return `    -- Set the checkbox state
+    self:SetChecked(checked)`;
+          case 'SetEnabled': return `    -- Set enabled state
+    self:SetEnabled(enabled)`;
+          case 'SetVisible': return `    -- Sets whether the panel is visible
+    self.BaseClass.SetVisible(self, visible)
+    if visible then
+        -- Logic when shown
+    else
+        -- Logic when hidden
+    end`;
           default: return '';
       }
   };

@@ -1,31 +1,66 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { ComponentType } from '../types';
-import { LayoutTemplate, Square, Type, MousePointer2, CheckSquare, SquareAsterisk, Box, Search, List, Table, Image as ImageIcon, Layers, ChevronDown, Folder, FormInput, Cuboid } from 'lucide-react';
+import { LayoutTemplate, Square, Type, MousePointer2, CheckSquare, SquareAsterisk, Box, Search, List, Table, Image as ImageIcon, Layers, ChevronDown, Folder, FormInput, Cuboid, LayoutGrid, GitMerge, Sliders, SquareChevronDown, SplitSquareVertical, SplitSquareHorizontal, Bell, Link, ExternalLink, Menu, Scroll, Columns, Book, Github } from 'lucide-react';
 
 interface SidebarProps {
   onAddComponent: (type: ComponentType) => void;
 }
 
-// Descriptions for tooltips
-const COMPONENT_INFO: Partial<Record<ComponentType, { desc: string, icon: any }>> = {
-  [ComponentType.DFrame]: { desc: "The main window container with title bar.", icon: LayoutTemplate },
-  [ComponentType.DPanel]: { desc: "A generic container for organizing other elements.", icon: Square },
-  [ComponentType.DButton]: { desc: "A clickable button that triggers an action.", icon: MousePointer2 },
-  [ComponentType.DLabel]: { desc: "Displays static text.", icon: Type },
-  [ComponentType.DTextEntry]: { desc: "A text input field for users.", icon: SquareAsterisk },
-  [ComponentType.DCheckBox]: { desc: "A boolean toggle box.", icon: CheckSquare },
-  [ComponentType.DComboBox]: { desc: "A dropdown menu for selecting one option.", icon: ChevronDown },
-  [ComponentType.DListView]: { desc: "A multi-column list of items.", icon: List },
-  [ComponentType.DGrid]: { desc: "Arranges items in a grid layout.", icon: Table },
-  [ComponentType.DImage]: { desc: "Displays an image or material.", icon: ImageIcon },
-  [ComponentType.DPropertySheet]: { desc: "A tabbed container for switching views.", icon: Layers },
-  [ComponentType.DTab]: { desc: "A tab page for a PropertySheet.", icon: Folder },
-  [ComponentType.DForm]: { desc: "A container form for inputs.", icon: FormInput },
-  [ComponentType.DModelPanel]: { desc: "Displays a 3D model.", icon: Cuboid },
+const WIKI_BASE = "https://wiki.facepunch.com/gmod/";
+const GITHUB_BASE = "https://github.com/Facepunch/garrysmod/blob/master/garrysmod/lua/vgui/";
+
+// Comprehensive Wiki Data
+const COMPONENT_INFO: Record<ComponentType, { desc: string, icon: any, wiki: string }> = {
+  [ComponentType.DFrame]: { desc: "The standard window frame. It can be moved, resized, and closed.", icon: LayoutTemplate, wiki: "DFrame" },
+  [ComponentType.DPanel]: { desc: "A base panel that everything else inherits from. Good for grouping.", icon: Square, wiki: "DPanel" },
+  [ComponentType.DButton]: { desc: "A standard button. Triggers an action when clicked.", icon: MousePointer2, wiki: "DButton" },
+  [ComponentType.DLabel]: { desc: "A simple text label. Supports fonts and colors.", icon: Type, wiki: "DLabel" },
+  [ComponentType.DTextEntry]: { desc: "Allows the user to input text.", icon: SquareAsterisk, wiki: "DTextEntry" },
+  [ComponentType.DCheckBox]: { desc: "A checkbox with a label. Returns 1 or 0.", icon: CheckSquare, wiki: "DCheckBox" },
+  [ComponentType.DComboBox]: { desc: "A dropdown menu allowing single selection from a list.", icon: ChevronDown, wiki: "DComboBox" },
+  [ComponentType.DListView]: { desc: "A multi-column list view with sortable headers.", icon: List, wiki: "DListView" },
+  [ComponentType.DGrid]: { desc: "Arranges its children in a grid pattern.", icon: Table, wiki: "DGrid" },
+  [ComponentType.DImage]: { desc: "Displays a texture or material.", icon: ImageIcon, wiki: "DImage" },
+  [ComponentType.DPropertySheet]: { desc: "A tab control allowing switching between multiple panels.", icon: Layers, wiki: "DPropertySheet" },
+  [ComponentType.DTab]: { desc: "A tab for use within a DPropertySheet.", icon: Folder, wiki: "DTab" },
+  [ComponentType.DForm]: { desc: "A vertical list of label-widget pairs, useful for settings menus.", icon: FormInput, wiki: "DForm" },
+  [ComponentType.DModelPanel]: { desc: "Renders a 3D model within the UI.", icon: Cuboid, wiki: "DModelPanel" },
+  [ComponentType.DIconLayout]: { desc: "Automatically arranges children in a wrapping layout.", icon: LayoutGrid, wiki: "DIconLayout" },
+  [ComponentType.DTree]: { desc: "A file-browser style tree view.", icon: GitMerge, wiki: "DTree" },
+  [ComponentType.DCollapsibleCategory]: { desc: "A header that can expand or collapse to show content.", icon: SquareChevronDown, wiki: "DCollapsibleCategory" },
+  [ComponentType.DNumSlider]: { desc: "A slider combined with a number text entry.", icon: Sliders, wiki: "DNumSlider" },
+  [ComponentType.DVerticalDivider]: { desc: "A vertical bar that can resize two panels.", icon: SplitSquareVertical, wiki: "DVerticalDivider" },
+  [ComponentType.DHorizontalDivider]: { desc: "A horizontal bar that can resize two panels.", icon: SplitSquareHorizontal, wiki: "DHorizontalDivider" },
+  [ComponentType.DMenuBar]: { desc: "A menu bar, typically found at the top of a window.", icon: Menu, wiki: "DMenuBar" },
+  [ComponentType.DMenu]: { desc: "A popup menu list.", icon: List, wiki: "DMenu" },
+  [ComponentType.DHTML]: { desc: "Embeds an Awesomium/Chromium web browser.", icon: Box, wiki: "DHTML" },
+  [ComponentType.DBinder]: { desc: "Input field for binding keys.", icon: Box, wiki: "DBinder" },
+  [ComponentType.DColorCube]: { desc: "A color selection cube (Sat/Val).", icon: Box, wiki: "DColorCube" },
+  [ComponentType.DColorPalette]: { desc: "A grid of selectable colors.", icon: Box, wiki: "DColorPalette" },
+  [ComponentType.DColorMixer]: { desc: "A full color mixing control.", icon: Box, wiki: "DColorMixer" },
+  [ComponentType.DSlider]: { desc: "A simple dragger/slider.", icon: Sliders, wiki: "DSlider" },
+  [ComponentType.DImageButton]: { desc: "A button represented by an image.", icon: ImageIcon, wiki: "DImageButton" },
+  [ComponentType.DNotify]: { desc: "A notification panel that fades out.", icon: Bell, wiki: "DNotify" },
+  [ComponentType.DProgress]: { desc: "A progress bar.", icon: Box, wiki: "DProgress" },
+  [ComponentType.DRichText]: { desc: "A text panel supporting colors and formatting.", icon: Type, wiki: "DRichText" },
+  [ComponentType.DSysButton]: { desc: "OS-style window buttons (Close, Min, Max).", icon: Box, wiki: "DSysButton" },
+  [ComponentType.DTooltip]: { desc: "A tooltip panel.", icon: Box, wiki: "DTooltip" },
+  [ComponentType.DNumberWang]: { desc: "A numeric input with up/down arrows.", icon: Box, wiki: "DNumberWang" },
+  [ComponentType.DBevel]: { desc: "A generic bevel panel.", icon: Box, wiki: "DBevel" },
+  [ComponentType.DScrollPanel]: { desc: "A panel that handles scrolling for its children.", icon: Scroll, wiki: "DScrollPanel" },
+  [ComponentType.DColumnSheet]: { desc: "A panel with a list of categories on the left.", icon: Columns, wiki: "DColumnSheet" }
 };
 
 const Sidebar: React.FC<SidebarProps> = ({ onAddComponent }) => {
   const [searchTerm, setSearchTerm] = useState('');
+  const [hoveredType, setHoveredType] = useState<ComponentType | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number, y: number, type: ComponentType } | null>(null);
+
+  useEffect(() => {
+    const handleClick = () => setContextMenu(null);
+    document.addEventListener('click', handleClick);
+    return () => document.removeEventListener('click', handleClick);
+  }, []);
 
   const filteredComponents = useMemo(() => {
     return Object.values(ComponentType).filter(type => 
@@ -33,8 +68,30 @@ const Sidebar: React.FC<SidebarProps> = ({ onAddComponent }) => {
     );
   }, [searchTerm]);
 
+  const activeInfo = hoveredType ? COMPONENT_INFO[hoveredType] : null;
+
+  const handleContextMenu = (e: React.MouseEvent, type: ComponentType) => {
+      e.preventDefault();
+      setContextMenu({
+          x: e.clientX,
+          y: e.clientY,
+          type
+      });
+  };
+
+  const openWiki = (type: ComponentType) => {
+      const info = COMPONENT_INFO[type];
+      if (info) window.open(`${WIKI_BASE}${info.wiki}`, '_blank');
+  };
+
+  const openGithub = (type: ComponentType) => {
+      // Heuristic: most Lua VGUI files are lowercase named matching the component name
+      const filename = `${type.toLowerCase()}.lua`;
+      window.open(`${GITHUB_BASE}${filename}`, '_blank');
+  };
+
   return (
-    <div className="w-64 bg-neutral-900 border-r border-neutral-800 flex flex-col shrink-0 overflow-hidden z-10">
+    <div className="w-full h-full bg-neutral-900 flex flex-col shrink-0 overflow-hidden z-10">
       <div className="p-4 border-b border-neutral-800 bg-neutral-900">
         <h2 className="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-3">Components</h2>
         <div className="relative">
@@ -53,14 +110,15 @@ const Sidebar: React.FC<SidebarProps> = ({ onAddComponent }) => {
         {filteredComponents.map((type) => {
           const info = COMPONENT_INFO[type];
           const Icon = info?.icon || Box;
-          const description = info?.desc || `Insert a ${type} element.`;
 
           return (
             <button
               key={type}
               onClick={() => onAddComponent(type)}
+              onMouseEnter={() => setHoveredType(type)}
+              onMouseLeave={() => setHoveredType(null)}
+              onContextMenu={(e) => handleContextMenu(e, type)}
               className="w-full flex items-center p-2 rounded-md hover:bg-neutral-800 border border-transparent hover:border-neutral-700 transition-all group text-left relative"
-              title={`${type}: ${description}`}
             >
               <div className="p-1.5 bg-neutral-800 rounded mr-3 group-hover:bg-neutral-700 text-neutral-400 group-hover:text-blue-400 transition-colors">
                 <Icon className="w-4 h-4" />
@@ -68,9 +126,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onAddComponent }) => {
               <div className="flex flex-col overflow-hidden">
                   <span className="text-sm font-medium text-neutral-300 group-hover:text-white truncate">
                     {type}
-                  </span>
-                  <span className="text-[10px] text-neutral-500 truncate">
-                      {description}
                   </span>
               </div>
             </button>
@@ -84,11 +139,62 @@ const Sidebar: React.FC<SidebarProps> = ({ onAddComponent }) => {
         )}
       </div>
       
-      <div className="p-3 border-t border-neutral-800 bg-neutral-900">
-        <div className="px-3 py-2 bg-neutral-800/50 rounded border border-neutral-800 text-[10px] text-neutral-500 text-center">
-          Click component to add. <br/>Hover for details.
-        </div>
+      <div className="p-4 border-t border-neutral-800 bg-neutral-900 min-h-[140px] flex flex-col">
+        {activeInfo ? (
+            <div className="animate-in fade-in duration-200">
+                 <div className="flex items-center gap-2 mb-2">
+                     <span className="font-bold text-base text-white">{hoveredType}</span>
+                     <a 
+                        href={`${WIKI_BASE}${activeInfo.wiki}`} 
+                        target="_blank" 
+                        rel="noreferrer"
+                        className="text-blue-400 hover:text-blue-300"
+                        title="Open GMod Wiki"
+                     >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                     </a>
+                 </div>
+                 <p className="text-sm text-neutral-300 leading-relaxed">
+                     {activeInfo.desc}
+                 </p>
+                 <div className="mt-3 text-[10px] text-neutral-500 flex items-center gap-1.5">
+                    <Link className="w-3 h-3" />
+                    <span>Right-click for options</span>
+                 </div>
+            </div>
+        ) : (
+            <div className="text-sm text-neutral-500 text-center flex flex-col items-center justify-center h-full opacity-60">
+                <MousePointer2 className="w-8 h-8 mb-2 opacity-20" />
+                <span>Hover over a component<br/>to see details</span>
+            </div>
+        )}
       </div>
+
+      {contextMenu && (
+        <div 
+            className="fixed z-50 bg-neutral-800 border border-neutral-700 shadow-xl rounded-md py-1 w-48 animate-in fade-in zoom-in-95 duration-100"
+            style={{ top: contextMenu.y, left: contextMenu.x }}
+            onClick={(e) => e.stopPropagation()} 
+        >
+            <div className="px-3 py-1.5 text-xs font-semibold text-neutral-400 border-b border-neutral-700 mb-1">
+                {contextMenu.type}
+            </div>
+            <button 
+                onClick={() => { openWiki(contextMenu.type); setContextMenu(null); }}
+                className="w-full text-left px-3 py-2 text-sm text-neutral-200 hover:bg-blue-600 hover:text-white flex items-center gap-2 transition-colors"
+            >
+                <Book className="w-4 h-4" />
+                GMod Wiki
+            </button>
+            <button 
+                onClick={() => { openGithub(contextMenu.type); setContextMenu(null); }}
+                className="w-full text-left px-3 py-2 text-sm text-neutral-200 hover:bg-blue-600 hover:text-white flex items-center gap-2 transition-colors"
+            >
+                <Github className="w-4 h-4" />
+                Github Source
+            </button>
+        </div>
+      )}
     </div>
   );
 };

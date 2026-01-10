@@ -34,6 +34,7 @@ export enum ComponentType {
   DSysButton = 'DSysButton',
   DTooltip = 'DTooltip',
   DVerticalDivider = 'DVerticalDivider',
+  DHorizontalDivider = 'DHorizontalDivider',
   DNumberWang = 'DNumberWang',
   DBevel = 'DBevel',
   DTab = 'DTab'
@@ -49,6 +50,10 @@ export interface ComponentProps {
   checked?: boolean;
   variableName: string;
   
+  // State
+  visible?: boolean;
+  enabled?: boolean;
+
   // Appearance
   tooltip?: string;
   textAlign?: 'left' | 'center' | 'right';
@@ -61,16 +66,20 @@ export interface ComponentProps {
   // Enhanced Hover
   hoverOpacity?: number; // 0-255
   hoverBorderColor?: string;
+  hoverBorderWidth?: number;
 
   // Text Shadow
   textShadow?: boolean;
   textShadowColor?: string;
   textShadowOffset?: number;
 
-  // Layout
+  // Layout (Parent)
   layoutMode?: 'none' | 'vertical' | 'horizontal';
   layoutSpacing?: number;
   layoutPadding?: number;
+
+  // Layout (Child)
+  autoLayoutBehavior?: 'fixed' | 'fill' | 'shrink';
 
   // Effects
   hoverScale?: number; // Multiplier, e.g. 1.1
@@ -78,6 +87,7 @@ export interface ComponentProps {
   // Image
   imageUrl?: string;
   imageColor?: string; // Tint color
+  keepAspect?: boolean;
 
   // Font
   fontFamily?: string;
@@ -94,6 +104,19 @@ export interface ComponentProps {
   sizable?: boolean;
   showCloseButton?: boolean;
   deleteOnClose?: boolean;
+  
+  // DNumSlider Specifics
+  min?: number;
+  max?: number;
+  decimals?: number;
+  value?: number;
+
+  // DIconLayout Specifics
+  spaceX?: number;
+  spaceY?: number;
+  
+  // DCollapsibleCategory Specifics
+  expanded?: boolean;
 
   // Logic
   methods?: Record<string, string>; // methodName -> code body

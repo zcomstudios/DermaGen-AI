@@ -24,7 +24,7 @@ export const generateLayoutFromPrompt = async (prompt: string): Promise<AICompon
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
+      model: 'gemini-3-pro-preview',
       contents: `Generate a GMod Derma UI layout based on this description: "${prompt}".
       
       Requirements:
@@ -32,6 +32,7 @@ export const generateLayoutFromPrompt = async (prompt: string): Promise<AICompon
       2. Provide realistic coordinates and sizes assuming an 800x600 canvas.
       3. Nest components logically (e.g., DButton inside DFrame).
       4. Use hex colors for styling if mentioned (e.g. #333333).
+      5. Keep the structure concise. Avoid generating huge lists or deep recursion.
       `,
       config: {
         responseMimeType: "application/json",

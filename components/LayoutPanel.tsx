@@ -3,7 +3,8 @@ import { UIElement, ComponentType } from '../types';
 import { 
   X, ChevronRight, ChevronDown, LayoutTemplate, Square, MousePointer2, 
   Type, SquareAsterisk, CheckSquare, ChevronDown as ComboIcon, List, 
-  Table, Image as ImageIcon, Layers, Folder, FormInput, Cuboid, Box 
+  Table, Image as ImageIcon, Layers, Folder, FormInput, Cuboid, Box,
+  LayoutGrid, GitMerge, SquareChevronDown, Sliders
 } from 'lucide-react';
 
 interface LayoutPanelProps {
@@ -32,6 +33,10 @@ const getIconForType = (type: ComponentType) => {
     case ComponentType.DTab: return Folder;
     case ComponentType.DForm: return FormInput;
     case ComponentType.DModelPanel: return Cuboid;
+    case ComponentType.DIconLayout: return LayoutGrid;
+    case ComponentType.DTree: return GitMerge;
+    case ComponentType.DCollapsibleCategory: return SquareChevronDown;
+    case ComponentType.DNumSlider: return Sliders;
     default: return Box;
   }
 };

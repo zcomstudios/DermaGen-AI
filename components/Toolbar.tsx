@@ -5,9 +5,10 @@ interface ToolbarProps {
   onClear: () => void;
   onGenerateAI: (prompt: string) => void;
   isGenerating: boolean;
+  progress: number;
 }
 
-const Toolbar: React.FC<ToolbarProps> = ({ onClear, onGenerateAI, isGenerating }) => {
+const Toolbar: React.FC<ToolbarProps> = ({ onClear, onGenerateAI, isGenerating, progress }) => {
   const [prompt, setPrompt] = useState('');
 
   const handleGenerate = () => {
@@ -58,6 +59,15 @@ const Toolbar: React.FC<ToolbarProps> = ({ onClear, onGenerateAI, isGenerating }
           <Trash2 className="w-5 h-5" />
         </button>
       </div>
+
+      {isGenerating && (
+        <div className="absolute bottom-0 left-0 w-full h-1 bg-neutral-800">
+          <div 
+            className="h-full bg-blue-500 transition-all duration-300 ease-out shadow-[0_0_10px_rgba(59,130,246,0.5)]" 
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      )}
     </div>
   );
 };

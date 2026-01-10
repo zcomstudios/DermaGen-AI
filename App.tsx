@@ -36,11 +36,25 @@ const App: React.FC = () => {
   const [viewState, setViewState] = useState<ViewState>(initialViewState);
   const [generatedCode, setGeneratedCode] = useState<string>('');
   const [isGeneratingAI, setIsGeneratingAI] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState(0);
   const [isOutputCollapsed, setIsOutputCollapsed] = useState(false);
   const [isMethodsMenuOpen, setIsMethodsMenuOpen] = useState(false);
   const [isLayoutOpen, setIsLayoutOpen] = useState(false);
   const [currentFileName, setCurrentFileName] = useState<string>("project.json");
   
+  // Layout State for Resizing
+  const [layout, setLayout] = useState({
+      sidebarWidth: 260,
+      propertiesWidth: 320,
+      outputHeight: 200
+  });
+
+  const draggingRef = useRef<{
+      type: 'sidebar' | 'properties' | 'output';
+      startVal: number;
+      startMouse: number;
+  } | null>(null);
+
   // Hidden inputs for file operations
   const openFileRef = useRef<HTMLInputElement>(null);
   const importLuaRef = useRef<HTMLInputElement>(null);
@@ -62,6 +76,53 @@ const App: React.FC = () => {
     localStorage.setItem('dermaGenState', JSON.stringify(currentState));
     setGeneratedCode(generateLuaCode(currentState));
   }, [currentState]);
+
+  // Resizing Logic
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+        if (!draggingRef.current) return;
+        e.preventDefault();
+        const { type, startVal, startMouse } = draggingRef.current;
+
+        if (type === 'sidebar') {
+            const delta = e.clientX - startMouse;
+            const newWidth = Math.max(200, Math.min(600, startVal + delta));
+            setLayout(prev => ({ ...prev, sidebarWidth: newWidth }));
+        } else if (type === 'properties') {
+            const delta = startMouse - e.clientX; // Inverted for right panel
+            const newWidth = Math.max(250, Math.min(600, startVal + delta));
+            setLayout(prev => ({ ...prev, propertiesWidth: newWidth }));
+        } else if (type === 'output') {
+            const delta = startMouse - e.clientY; // Inverted for bottom panel
+            const newHeight = Math.max(100, Math.min(800, startVal + delta));
+            setLayout(prev => ({ ...prev, outputHeight: newHeight }));
+        }
+    };
+
+    const handleMouseUp = () => {
+        if (draggingRef.current) {
+            draggingRef.current = null;
+            document.body.style.cursor = '';
+        }
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+        window.removeEventListener('mousemove', handleMouseMove);
+        window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
+
+  const startResizing = (type: 'sidebar' | 'properties' | 'output', e: React.MouseEvent) => {
+      e.preventDefault();
+      draggingRef.current = {
+          type,
+          startVal: type === 'sidebar' ? layout.sidebarWidth : type === 'properties' ? layout.propertiesWidth : layout.outputHeight,
+          startMouse: type === 'output' ? e.clientY : e.clientX
+      };
+      document.body.style.cursor = type === 'output' ? 'row-resize' : 'col-resize';
+  };
 
   const pushState = useCallback((newState: EditorState) => {
     setHistory(prev => {
@@ -371,33 +432,66 @@ const App: React.FC = () => {
 
   const handleAIGeneration = async (prompt: string) => {
     setIsGeneratingAI(true);
-    const layout = await generateLayoutFromPrompt(prompt);
-    setIsGeneratingAI(false);
-    if (layout && layout.type === ComponentType.DFrame) {
-      const elements: Record<string, UIElement> = {};
-      let rootId: string | null = null;
-      const processNode = (node: any, parentId: string | null) => {
-        const id = Math.random().toString(36).substr(2, 9);
-        const el: UIElement = {
-          id,
-          type: node.type as ComponentType,
-          parentId,
-          children: [],
-          props: {
-            x: node.x || 0, y: node.y || 0, w: node.w || 100, h: node.h || 30,
-            text: node.text, color: node.color,
-            variableName: `${node.type.toLowerCase()}_${Math.floor(Math.random() * 1000)}`
-          }
-        };
-        elements[id] = el;
-        if (parentId && elements[parentId]) elements[parentId].children.push(id);
-        if (!parentId) rootId = id;
-        if (node.children) node.children.forEach((child: any) => processNode(child, id));
-      };
-      processNode(layout, null);
-      pushState({ ...initialState, elements, rootId, selectedId: rootId });
-    } else {
+    setGenerationProgress(0);
+
+    // Simulate progress
+    const duration = 6000; // estimated duration
+    const intervalTime = 100;
+    const steps = duration / intervalTime;
+    let currentStep = 0;
+
+    const timer = setInterval(() => {
+        currentStep++;
+        // Logarithmic-ish progress that slows down as it approaches 95%
+        const progress = Math.min(95, Math.round((1 - Math.pow(0.5, currentStep / (steps * 0.4))) * 100));
+        setGenerationProgress(progress);
+    }, intervalTime);
+
+    try {
+        const layout = await generateLayoutFromPrompt(prompt);
+        
+        clearInterval(timer);
+        setGenerationProgress(100);
+
+        if (layout && layout.type === ComponentType.DFrame) {
+            const elements: Record<string, UIElement> = {};
+            let rootId: string | null = null;
+            const processNode = (node: any, parentId: string | null) => {
+                const id = Math.random().toString(36).substr(2, 9);
+                const el: UIElement = {
+                id,
+                type: node.type as ComponentType,
+                parentId,
+                children: [],
+                props: {
+                    x: node.x || 0, y: node.y || 0, w: node.w || 100, h: node.h || 30,
+                    text: node.text, color: node.color,
+                    variableName: `${node.type.toLowerCase()}_${Math.floor(Math.random() * 1000)}`
+                }
+                };
+                elements[id] = el;
+                if (parentId && elements[parentId]) elements[parentId].children.push(id);
+                if (!parentId) rootId = id;
+                if (node.children) node.children.forEach((child: any) => processNode(child, id));
+            };
+            processNode(layout, null);
+            
+            // Small delay to let user see 100% bar
+            setTimeout(() => {
+                pushState({ ...initialState, elements, rootId, selectedId: rootId });
+                setIsGeneratingAI(false);
+                setGenerationProgress(0);
+            }, 600);
+        } else {
+            alert("Failed to generate valid UI structure.");
+            setIsGeneratingAI(false);
+            setGenerationProgress(0);
+        }
+    } catch (e) {
+        clearInterval(timer);
         alert("Failed to generate UI.");
+        setIsGeneratingAI(false);
+        setGenerationProgress(0);
     }
   };
 
@@ -472,7 +566,12 @@ const App: React.FC = () => {
         className="hidden" 
       />
 
-      <Toolbar onClear={clearCanvas} onGenerateAI={handleAIGeneration} isGenerating={isGeneratingAI} />
+      <Toolbar 
+        onClear={clearCanvas} 
+        onGenerateAI={handleAIGeneration} 
+        isGenerating={isGeneratingAI} 
+        progress={generationProgress}
+      />
       
       {/* Secondary Toolbar (History, Grid, Methods) */}
       <div className="h-10 bg-neutral-900 border-b border-neutral-800 flex items-center px-4 justify-between shrink-0">
@@ -506,7 +605,16 @@ const App: React.FC = () => {
       </div>
 
       <div className="flex flex-1 overflow-hidden relative">
-        <Sidebar onAddComponent={addComponent} />
+        {/* Sidebar */}
+        <div style={{ width: layout.sidebarWidth }} className="shrink-0 flex flex-col border-r border-neutral-800">
+             <Sidebar onAddComponent={addComponent} />
+        </div>
+
+        {/* Sidebar Resizer */}
+        <div 
+            className="w-1 bg-neutral-900 hover:bg-blue-600 cursor-col-resize transition-colors z-20 flex-shrink-0"
+            onMouseDown={(e) => startResizing('sidebar', e)}
+        />
         
         {/* Middle Column: Canvas + Lua Output */}
         <div className="flex-1 flex flex-col min-w-0 bg-[#151515] relative">
@@ -519,10 +627,21 @@ const App: React.FC = () => {
                 onDeleteElement={deleteComponent}
             />
             
-            {/* Lua Output Panel */}
-            <div className={`border-t border-neutral-800 bg-[#1e1e1e] flex flex-col shrink-0 transition-all duration-300 z-10 ${isOutputCollapsed ? 'h-9' : 'h-64'}`}>
+            {/* Output Panel Resizer */}
+            {!isOutputCollapsed && (
                 <div 
-                    className="h-9 border-b border-neutral-800 bg-neutral-900 flex items-center justify-between px-3 cursor-pointer select-none hover:bg-neutral-800/80 transition-colors"
+                    className="h-1 bg-neutral-900 hover:bg-blue-600 cursor-row-resize transition-colors z-20 shrink-0"
+                    onMouseDown={(e) => startResizing('output', e)}
+                />
+            )}
+
+            {/* Lua Output Panel */}
+            <div 
+                className={`border-t border-neutral-800 bg-[#1e1e1e] flex flex-col shrink-0 transition-all duration-300 z-10`}
+                style={{ height: isOutputCollapsed ? '36px' : layout.outputHeight }}
+            >
+                <div 
+                    className="h-9 border-b border-neutral-800 bg-neutral-900 flex items-center justify-between px-3 cursor-pointer select-none hover:bg-neutral-800/80 transition-colors shrink-0"
                     onClick={() => setIsOutputCollapsed(!isOutputCollapsed)}
                 >
                     <div className="flex items-center text-neutral-400 gap-2">
@@ -559,8 +678,14 @@ const App: React.FC = () => {
             />
         </div>
         
+        {/* Properties Resizer */}
+        <div 
+            className="w-1 bg-neutral-900 hover:bg-blue-600 cursor-col-resize transition-colors z-20 flex-shrink-0"
+            onMouseDown={(e) => startResizing('properties', e)}
+        />
+
         {/* Right Column: Properties */}
-        <div className="flex flex-col border-l border-neutral-800 w-80 shrink-0 bg-neutral-900">
+        <div style={{ width: layout.propertiesWidth }} className="flex flex-col border-l border-neutral-800 shrink-0 bg-neutral-900 overflow-hidden">
              <div className="flex-1 flex flex-col min-h-0">
                 <PropertiesPanel 
                     selectedElement={currentState.selectedId ? currentState.elements[currentState.selectedId] : null}

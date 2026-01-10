@@ -22,6 +22,13 @@ const COMMON_PANEL_METHODS: MethodSignature[] = [
   { name: 'SetKeyboardInput', args: ['self', 'b'], description: 'Sets whether keyboard input is enabled.' },
   { name: 'OnDraw', args: ['self', 'w', 'h'], description: 'Custom draw function.' },
   { name: 'OnPaint', args: ['self', 'w', 'h'], description: 'Alternative paint hook.' },
+  { name: 'GetSize', args: ['self'], description: 'Returns the width and height of the panel.' },
+  { name: 'GetWide', args: ['self'], description: 'Returns the width of the panel.' },
+  { name: 'SetSize', args: ['self', 'w', 'h'], description: 'Sets the size of the panel.' },
+  { name: 'SetPos', args: ['self', 'x', 'y'], description: 'Sets the position of the panel.' },
+  { name: 'SetText', args: ['self', 'text'], description: 'Sets the text of the panel.' },
+  { name: 'SetVisible', args: ['self', 'visible'], description: 'Sets the visibility of the panel.' },
+  { name: 'SetEnabled', args: ['self', 'enabled'], description: 'Sets whether the panel is enabled.' },
 ];
 
 const COMPONENT_METHODS: Partial<Record<ComponentType, MethodSignature[]>> = {
@@ -43,6 +50,7 @@ const COMPONENT_METHODS: Partial<Record<ComponentType, MethodSignature[]>> = {
   ],
   [ComponentType.DCheckBox]: [
     { name: 'OnChange', args: ['self', 'bVal'], description: 'Called when the checkbox state changes.' },
+    { name: 'SetChecked', args: ['self', 'checked'], description: 'Sets the checked state.' },
   ],
   [ComponentType.DComboBox]: [
     { name: 'OnSelect', args: ['self', 'index', 'value', 'data'], description: 'Called when an option is selected.' },
