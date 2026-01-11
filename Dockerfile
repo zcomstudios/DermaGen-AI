@@ -3,6 +3,10 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
+
+ARG GEMINI_API_KEY
+ENV GEMINI_API_KEY=$GEMINI_API_KEY
+
 COPY . .
 # Note: React env vars must be available at BUILD time. 
 # If you use secrets, you may need to set them in Cloud Build triggers.
