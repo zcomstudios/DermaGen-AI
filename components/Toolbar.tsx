@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
-import { Wand2, Code, Trash2, Download } from 'lucide-react';
+import { Wand2, Trash2 } from 'lucide-react';
 
 interface ToolbarProps {
   onClear: () => void;
   onGenerateAI: (prompt: string) => void;
   isGenerating: boolean;
+  onAboutClick?: () => void;
 }
 
-const Toolbar: React.FC<ToolbarProps> = ({ onClear, onGenerateAI, isGenerating }) => {
+const Toolbar: React.FC<ToolbarProps> = ({ onClear, onGenerateAI, isGenerating, onAboutClick }) => {
   const [prompt, setPrompt] = useState('');
 
   const handleGenerate = () => {
@@ -18,10 +19,8 @@ const Toolbar: React.FC<ToolbarProps> = ({ onClear, onGenerateAI, isGenerating }
 
   return (
     <div className="h-16 border-b border-neutral-800 bg-neutral-900 flex items-center px-4 justify-between shrink-0 z-20 relative">
-      <div className="flex items-center space-x-2">
-        <div className="bg-blue-600 p-2 rounded-lg">
-          <Code className="text-white w-5 h-5" />
-        </div>
+      <div className="flex items-center space-x-3 cursor-pointer group" onClick={onAboutClick}>
+        <img src="/logo_dermagen.png" alt="DermaGen Logo" className="w-8 h-8 object-contain group-hover:opacity-80 transition-opacity" />
         <h1 className="font-bold text-xl tracking-tight text-white">DermaGen <span className="text-blue-400">AI</span></h1>
       </div>
 
