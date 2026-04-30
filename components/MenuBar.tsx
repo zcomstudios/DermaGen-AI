@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { 
   File, FolderOpen, Save, FileOutput, FileInput, Plus, 
   HelpCircle, Settings, Menu, X, Undo, Redo, Copy, Trash,
-  Check
+  Check, Book, Github
 } from 'lucide-react';
 
 interface MenuBarProps {
@@ -16,7 +16,8 @@ interface MenuBarProps {
   onRedo: () => void;
   onDelete: () => void;
   onDuplicate: () => void;
-  onAbout: () => void;
+  onToggleLayout: () => void;
+  isLayoutOpen: boolean;
   canUndo: boolean;
   canRedo: boolean;
   hasSelection: boolean;
@@ -24,7 +25,7 @@ interface MenuBarProps {
 
 const MenuBar: React.FC<MenuBarProps> = ({
   onNew, onOpen, onSave, onSaveAs, onImport, onExport,
-  onUndo, onRedo, onDelete, onDuplicate, onAbout,
+  onUndo, onRedo, onDelete, onDuplicate, onToggleLayout, isLayoutOpen,
   canUndo, canRedo, hasSelection
 }) => {
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
@@ -115,13 +116,18 @@ const MenuBar: React.FC<MenuBarProps> = ({
       </MenuDropdown>
 
       <MenuDropdown title="View" id="view">
+        <MenuItem label="Layout Tree" onClick={onToggleLayout} checked={isLayoutOpen} />
+        <Divider />
         <MenuItem label="Reset View" onClick={() => {}} shortcut="1:1" />
         <MenuItem label="Toggle Grid" onClick={() => {}} />
       </MenuDropdown>
 
       <MenuDropdown title="Help" id="help">
+        <MenuItem label="GMod Wiki" icon={Book} onClick={() => window.open("https://wiki.facepunch.com/gmod/", "_blank")} />
+        <MenuItem label="GitHub Repo" icon={Github} onClick={() => window.open("https://github.com/Facepunch/garrysmod", "_blank")} />
+        <Divider />
         <MenuItem label="Shortcuts" icon={HelpCircle} onClick={() => alert("Ctrl+Z: Undo\nCtrl+Y: Redo\nCtrl+D: Duplicate\nDel: Delete\nCtrl+S: Save")} />
-        <MenuItem label="About" icon={Settings} onClick={onAbout} />
+        <MenuItem label="About" icon={Settings} onClick={() => alert("DermaGen AI\nA visual editor for Garry's Mod Derma.")} />
       </MenuDropdown>
     </div>
   );

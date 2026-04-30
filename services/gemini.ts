@@ -24,7 +24,7 @@ export const generateLayoutFromPrompt = async (prompt: string): Promise<AICompon
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
+      model: 'gemini-3-pro-preview',
       contents: `Generate a GMod Derma UI layout based on this description: "${prompt}".
       
       Requirements:
@@ -32,6 +32,7 @@ export const generateLayoutFromPrompt = async (prompt: string): Promise<AICompon
       2. Provide realistic coordinates and sizes assuming an 800x600 canvas.
       3. Nest components logically (e.g., DButton inside DFrame).
       4. Use hex colors for styling if mentioned (e.g. #333333).
+      5. Keep the structure concise. Avoid generating huge lists or deep recursion.
       `,
       config: {
         responseMimeType: "application/json",
@@ -57,13 +58,23 @@ export const generateLayoutFromPrompt = async (prompt: string): Promise<AICompon
                     h: { type: Type.INTEGER },
                     text: { type: Type.STRING, nullable: true },
                     color: { type: Type.STRING, nullable: true },
-                    // Recursive schema definition is tricky in simple JSON schema, 
-                    // so we flatten the structure instructions or just support 1 level deep for this demo effectively,
-                    // but GenAI SDK supports recursive objects implicitly often. 
-                    // To be safe, let's allow "children" here recursively.
+                     // Recursion depth 2 - Explicitly defining properties to satisfy schema requirements
                      children: { 
                         type: Type.ARRAY, 
-                        items: { type: Type.OBJECT, nullable: true }, // Loose typing for recursion depth
+                        items: { 
+                            type: Type.OBJECT, 
+                            properties: {
+                                type: { type: Type.STRING, enum: Object.values(ComponentType) },
+                                x: { type: Type.INTEGER },
+                                y: { type: Type.INTEGER },
+                                w: { type: Type.INTEGER },
+                                h: { type: Type.INTEGER },
+                                text: { type: Type.STRING, nullable: true },
+                                color: { type: Type.STRING, nullable: true }
+                                // Stop recursion here
+                            },
+                            nullable: true 
+                        }, 
                         nullable: true 
                      }
                 }
