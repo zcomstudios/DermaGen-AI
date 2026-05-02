@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+*.md
+!README.md
+.claude/
+.dev/
+.playwright-mcp/
+knowledge/

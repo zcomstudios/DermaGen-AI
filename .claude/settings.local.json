@@ -17,7 +17,20 @@
       "Bash(git pull *)",
       "Bash(git stash *)",
       "Bash(git checkout *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(npx vite *)",
+      "Bash(curl -s http://localhost:5179/)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:5179/index.tsx)",
+      "Bash(kill %1)",
+      "Bash(git log *)",
+      "mcp__plugin_playwright_playwright__browser_navigate",
+      "mcp__plugin_playwright_playwright__browser_console_messages",
+      "mcp__plugin_playwright_playwright__browser_snapshot",
+      "mcp__plugin_playwright_playwright__browser_take_screenshot",
+      "mcp__plugin_playwright_playwright__browser_close",
+      "Bash(pkill -f \"vite.*5179\\\\|vite.*5180\")",
+      "Skill(commit-commands:commit-push-pr)",
+      "Skill(commit-commands:commit-push-pr:*)"
     ]
   }
 }

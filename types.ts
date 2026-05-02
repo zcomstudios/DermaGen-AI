@@ -114,9 +114,98 @@ export interface ComponentProps {
   // DIconLayout Specifics
   spaceX?: number;
   spaceY?: number;
-  
+
   // DCollapsibleCategory Specifics
   expanded?: boolean;
+  headerHeight?: number;
+
+  // DProgress
+  progressFraction?: number;
+
+  // DSlider / DColorCube (2D handle position 0..1)
+  sliderX?: number;
+  sliderY?: number;
+
+  // DNumSlider / DNumberWang (numeric range)
+  sliderMin?: number;
+  sliderMax?: number;
+  sliderValue?: number;
+  sliderDecimals?: number;
+  numberInterval?: number;
+
+  // DImageButton
+  imageStretchToFit?: boolean;
+
+  // DRichText
+  richScrollbar?: boolean;
+
+  // DBinder
+  binderKey?: string;
+
+  // DVerticalDivider / DHorizontalDivider
+  dividerTopHeight?: number;
+  dividerHeight?: number;
+
+  // DColorMixer
+  mixerColor?: string;
+  mixerAlpha?: number;
+  mixerShowAlphaBar?: boolean;
+  mixerShowPalette?: boolean;
+  mixerShowWangs?: boolean;
+
+  // DColorCube
+  cubeBaseColor?: string;
+
+  // DColorPalette
+  paletteColors?: string;
+  paletteButtonSize?: number;
+  paletteNumRows?: number;
+
+  // DSysButton
+  sysButtonType?: 'close' | 'minim' | 'maxim' | 'newwin';
+
+  // DHTML
+  htmlUrl?: string;
+  htmlScrollbars?: boolean;
+
+  // DTree
+  treeNodes?: string;
+  treeIndentSize?: number;
+  treeLineHeight?: number;
+  treeShowIcons?: boolean;
+
+  // DMenu / DMenuBar
+  menuItems?: string;
+  menuShowIconColumn?: boolean;
+  menuBarItems?: string;
+
+  // DGrid
+  gridCols?: number;
+  gridColWide?: number;
+  gridRowHeight?: number;
+
+  // DIconLayout
+  iconSpaceX?: number;
+  iconSpaceY?: number;
+  iconBorder?: number;
+  iconLayoutDir?: 'LEFT' | 'TOP';
+
+  // DListView
+  listColumns?: string;
+  listRows?: string;
+  listSortable?: boolean;
+
+  // DComboBox
+  comboChoices?: string;
+  comboSortItems?: boolean;
+
+  // Per-type enabled/editable/paint flags (chunk-6 audit additions)
+  buttonEnabled?: boolean;
+  entryEditable?: boolean;
+  panelPaintBackground?: boolean;
+
+  // Editor-only flag — locked elements can't be moved/resized/deleted
+  locked?: boolean;
 
   // Logic
   methods?: Record<string, string>; // methodName -> code body
@@ -134,6 +223,7 @@ export interface EditorState {
   elements: Record<string, UIElement>;
   rootId: string | null;
   selectedId: string | null;
+  selectedIds: string[];
   canvasWidth: number;
   canvasHeight: number;
 }

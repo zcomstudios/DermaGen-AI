@@ -150,6 +150,7 @@ export const parseLuaToState = (luaCode: string): EditorState | null => {
       elements,
       rootId,
       selectedId: rootId,
+      selectedIds: rootId ? [rootId] : [],
       canvasWidth: 800,
       canvasHeight: 600
     };

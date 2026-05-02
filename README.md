@@ -1,155 +1,83 @@
 # DermaGen AI
 
 <div align="center">
-  <img src="logo_dermagen.png" alt="DermaGen Logo" width="120" height="120">
-  
-  **A Visual UI Editor for Garry's Mod Derma**
-  
-  [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
-  [![License](https://img.shields.io/badge/license-MIT-blue)]()
-  [![Version](https://img.shields.io/badge/version-1.0.0-blue)]()
+  <img src="header_dermagen.jpg" alt="DermaGen AI" width="auto" height="300">
 </div>
 
-## Overview
+Web-based WYSIWYG editor that generates Garry's Mod Derma/VGUI GLua code. Build UI hierarchies visually and export copy-paste ready Lua.
 
-DermaGen AI is a comprehensive visual editor designed for creating and managing Garry's Mod Derma UI elements. It combines an intuitive drag-and-drop canvas with AI-powered generation capabilities, allowing developers to rapidly prototype and build complex UI layouts without manually writing Lua code.
+## Setup
 
-Whether you're building admin panels, custom menus, or complex user interfaces for your Garry's Mod server, DermaGen AI streamlines the entire workflow from concept to deployment.
-
-## Key Features
-
-✨ **Visual Canvas Editor**
-- Intuitive drag-and-drop interface for building UI hierarchies
-- Real-time visual feedback as you design
-- Multi-select and grouping capabilities for complex layouts
-
-🧩 **Comprehensive Component Library**
-- Support for 30+ Derma component types
-- DFrame, DPanel, DButton, DLabel, DTextEntry, and many more
-- Full property customization for each component
-
-🤖 **AI-Powered Generation**
-- Powered by Google Gemini for intelligent UI generation
-- Describe your UI in natural language and watch it come to life
-- Perfect for rapid prototyping and exploration
-
-📝 **Live Code Export**
-- Real-time Lua code generation as you design
-- Copy generated code directly to your clipboard
-- Export as `.lua` files ready for deployment
-
-📂 **Import/Export Support**
-- Save projects as JSON for version control and sharing
-- Load existing Lua code to inspect and modify
-- Perfect for collaborative development
-
-⏮️ **Complete Undo/Redo System**
-- Full history tracking for all canvas operations
-- Jump back and forth through your design iterations
-- Never lose your work
-
-## Getting Started
-
-### Prerequisites
-
-- Node.js 18+ and npm
-- Modern web browser (Chrome, Firefox, Safari, Edge)
-- Garry's Mod (for testing generated Lua code)
-
-### Installation
+**Requirements:** Node.js 18+
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/dermagen-ai.git
-cd dermagen-ai
-
-# Install dependencies
+git clone https://github.com/zcomstudios/DermaGen-AI.git
+cd DermaGen-AI
 npm install
-
-# Start the development server
 npm run dev
 ```
 
-The application will be available at `http://localhost:5173`
+App runs at `http://localhost:5173`.
 
-### Basic Workflow
+### Gemini API Key
 
-1. **Create a new project** - Start with File > New Project
-2. **Add a DFrame** - The root window container (required first step)
-3. **Add components** - Use the sidebar to add UI elements
-4. **Customize properties** - Modify each component's properties in the right panel
-5. **Generate code** - View and export the Lua code in the output panel
-6. **Save your work** - File > Save Project to preserve your design
+AI generation requires a Google Gemini key. Get one at [aistudio.google.com](https://aistudio.google.com/app/apikeys).
 
-### AI Generation
-
-Describe the UI you want, and let DermaGen AI do the heavy lifting:
-
-**Example prompts:**
-- "A dark login panel with username, password fields, and a blue login button"
-- "A settings menu with sliders for volume, brightness, and text color picker"
-- "An admin panel with a table showing player names, health, and kick buttons"
-
-## Technology Stack
-
-- **React 19** - Modern UI framework with hooks
-- **TypeScript** - Type-safe JavaScript for reliability
-- **Tailwind CSS** - Utility-first styling
-- **Vite** - Lightning-fast build tool and dev server
-- **Lucide React** - Beautiful icon library
-- **Google Generative AI** - AI-powered UI generation
-
-## Project Structure
+The key is stored in `.env.local` at the project root. Open it and set:
 
 ```
-dermagen-ai/
-├── components/           # React components
-│   ├── Canvas.tsx        # Main drawing canvas
-│   ├── Toolbar.tsx       # Top toolbar with AI prompt
-│   ├── Sidebar.tsx       # Component library sidebar
-│   ├── PropertiesPanel.tsx # Property editor
-│   ├── MenuBar.tsx       # File and edit menus
-│   ├── AboutModal.tsx    # About dialog
-│   └── ...
-├── services/             # External API services
-│   └── gemini.ts         # Google Gemini AI integration
-├── utils/                # Utility functions
-│   ├── luaGenerator.ts   # Converts UI state to Lua code
-│   ├── luaParser.ts      # Parses Lua code to UI state
-│   └── ...
-├── types.ts              # TypeScript type definitions
-├── App.tsx               # Root application component
-└── index.tsx             # Application entry point
+GEMINI_API_KEY=your_key_here
 ```
 
-## Usage
+Then restart the dev server (`Ctrl+C`, `npm run dev`). The key is injected at compile time via `vite.config.ts` — it does not take effect without a restart.
 
-### Creating Components
+#### Changing the Key
 
-1. Click "New Project" or start with an existing project
-2. Add a **DFrame** (the window) as the root container
-3. Select the DFrame and add child components from the sidebar
-4. Customize each component's properties in the right panel
-5. Preview your UI on the canvas in real-time
+Edit `.env.local`, replace the value of `GEMINI_API_KEY`, and restart the dev server. No other files need to change.
 
-### Exporting Code
+#### Switching to a Different AI Provider
 
-The **Lua Output** panel at the bottom shows the generated Glua code:
-- **Copy** - Copy the entire code block to clipboard
-- **Export** - Download as a `.lua` file ready to use in your gamemode
+The integration is isolated to `services/gemini.ts`. To swap providers:
+
+1. Install the provider's SDK: `npm install <provider-sdk>`
+2. Add the provider's API key to `.env.local`, e.g. `OPENAI_API_KEY=your_key`
+3. In `vite.config.ts`, add the new key to the `define` block:
+   ```ts
+   'process.env.OPENAI_API_KEY': JSON.stringify(env.OPENAI_API_KEY)
+   ```
+4. Rewrite `services/gemini.ts` to call the new provider's API. The function signature to preserve is:
+   ```ts
+   generateLayoutFromPrompt(prompt: string): Promise<AIComponentDefinition | null>
+   ```
+   Return `null` on error or when the key is missing. `App.tsx` consumes only this function.
+5. Restart the dev server.
+
+## Workflow
+
+1. File > New Project
+2. Add a **DFrame** as the root (required)
+3. Add child components from the sidebar
+4. Edit properties in the right panel
+5. Copy/export the generated Lua from the output panel
 
 ### Importing Existing Code
 
-Load existing Derma code to view and modify it:
-1. File > Import Glua...
-2. Select a `.lua` file
-3. The UI structure appears on the canvas for editing
+File > Import Glua — loads a `.lua` file using standard `vgui.Create` patterns and reconstructs the component tree on the canvas.
 
-### Saving Your Work
+### Saving
 
-- **Save Project** (Ctrl+S) - Saves as JSON (preserves all properties)
-- **Save As** - Choose a custom filename
-- **Open Project** (Ctrl+O) - Load a previously saved JSON file
+- **Ctrl+S** — save as JSON (preserves all properties for future editing)
+- Export — download as `.lua` for direct use in a gamemode
+
+## AI Generation
+
+Enter a natural language description in the toolbar prompt. Examples:
+
+- `A dark login panel with username, password fields, and a login button`
+- `A settings menu with sliders for volume and brightness, plus a color picker`
+- `An admin panel with a player list and kick buttons`
+
+The generator produces a component tree using the Gemini API. Review the output before use.
 
 ## Keyboard Shortcuts
 
@@ -162,102 +90,36 @@ Load existing Derma code to view and modify it:
 | `Ctrl+D` | Duplicate Selected |
 | `Delete` | Delete Selected |
 
-## Configuration
+## Supported Components
 
-### Google Gemini API Setup
+**Containers:** DFrame, DPanel, DScrollPanel, DPropertySheet, DColumnSheet, DCollapsibleCategory, DForm, DTab
 
-To use AI generation features, you'll need a Google Gemini API key:
+**Input:** DTextEntry, DNumberWang, DSlider, DNumSlider, DBinder, DCheckBox, DComboBox
 
-1. Visit [Google AI Studio](https://aistudio.google.com/app/apikeys)
-2. Create a new API key
-3. Add it to your environment or configure in the application settings
+**Buttons:** DButton, DImageButton, DSysButton
 
-## Supported Derma Components
+**Display:** DLabel, DRichText, DProgress, DBevel, DHTML, DImage, DModelPanel, DTooltip, DNotify
 
-DermaGen AI supports the following Garry's Mod Derma components:
+**Layout:** DIconLayout, DGrid, DVerticalDivider, DHorizontalDivider
 
-- **Containers**: DFrame, DPanel
-- **Input**: DTextEntry, DNumberWang, DSlider, DNumSlider, DBinder
-- **Buttons**: DButton, DCheckBox, DImageButton
-- **Selection**: DComboBox, DListView, DMenu, DMenuBar
-- **Display**: DLabel, DRichText, DProgress, DBevel, DHTML
-- **Advanced**: DColorMixer, DColorCube, DColorPalette, DTree, DGrid, DIconLayout, DColumnSheet, DCollapsibleCategory, DVerticalDivider
-- **Special**: DSysButton
+**Color:** DColorMixer, DColorCube, DColorPalette
 
-## Tips & Best Practices
+**Navigation:** DTree, DMenu, DMenuBar
 
-### Performance
-- Keep component hierarchies shallow when possible
-- Use grouping to organize complex layouts
-- Test exported code in-game before deployment
+## Tech Stack
 
-### Design
-- Start with a DFrame for any new UI
-- Use semantic naming for variables (e.g., `btn_login_submit`)
-- Organize panels logically in the tree view
-
-### Code Quality
-- Review generated Lua code before using in production
-- Add custom event handlers after code generation
-- Consider version control for JSON project files
+- React 19, TypeScript, Vite
+- Tailwind CSS, Lucide React
+- Google Generative AI (`@google/genai`)
 
 ## Troubleshooting
 
-**Issue: AI generation not working**
-- Verify your Google Gemini API key is configured
-- Check browser console for error messages
-- Ensure you have internet connectivity
+**AI generation not working** — confirm the Gemini API key is set and the browser console shows no auth errors.
 
-**Issue: Lua code doesn't compile**
-- Verify all component properties are valid
-- Check that parent-child relationships are correct
-- Test the code in a simple Garry's Mod gamemode first
+**Lua won't compile in GMod** — verify parent-child relationships are valid and all required properties are set. Test in a minimal gamemode first.
 
-**Issue: Import fails**
-- Ensure the Lua file follows standard vgui.Create patterns
-- Check that the file encoding is UTF-8
-- Verify the code structure is valid
-
-## Contributing
-
-Contributions are welcome! Feel free to:
-- Report bugs and suggest features
-- Submit pull requests with improvements
-- Share UI designs and tips with the community
+**Import fails** — the parser expects standard `vgui.Create("...")` patterns and UTF-8 encoding.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Support
-
-For questions, issues, or suggestions:
-- Open an issue on GitHub
-- Check existing discussions for common problems
-- Review the Help > Shortcuts menu for keyboard shortcuts
-
-## Roadmap
-
-- [ ] Advanced layout constraints
-- [ ] Custom theme builder
-- [ ] Component templates library
-- [ ] Live preview in Garry's Mod
-- [ ] Collaborative editing
-- [ ] Plugin system for custom components
-- [ ] Animation timeline editor
-- [ ] Dark/Light theme toggle
-
-## Acknowledgments
-
-Built with ❤️ for the Garry's Mod community.
-
-Special thanks to:
-- [Facepunch Studios](https://www.facepunch.com/) - Garry's Mod
-- [Google AI](https://ai.google.dev/) - Gemini API
-- [React](https://react.dev/) - UI Framework
-
----
-
-**Version 1.0.0** - Built for Garry's Mod • Open Source
-
-[GitHub](https://github.com/yourusername/dermagen-ai) • [Issues](https://github.com/yourusername/dermagen-ai/issues) • [Discussions](https://github.com/yourusername/dermagen-ai/discussions)
+MIT
