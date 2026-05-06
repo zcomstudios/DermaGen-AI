@@ -40,7 +40,7 @@ If you enjoy DermaGen AI and find it useful, consider a small donation to suppor
 
 1. File > New Project
 
-<a href="screenshot_001.png" target="_blank"><img src="screenshot_001.png" alt="New Project" width="auto" height="150"></a>
+(screenshot_001.png)
 
 2. Add a **DFrame** as the root (required)
 
