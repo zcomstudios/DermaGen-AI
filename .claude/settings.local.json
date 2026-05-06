@@ -30,7 +30,9 @@
       "mcp__plugin_playwright_playwright__browser_close",
       "Bash(pkill -f \"vite.*5179\\\\|vite.*5180\")",
       "Skill(commit-commands:commit-push-pr)",
-      "Skill(commit-commands:commit-push-pr:*)"
+      "Skill(commit-commands:commit-push-pr:*)",
+      "Bash(git rm *)",
+      "Bash(gh auth *)"
     ]
   }
 }

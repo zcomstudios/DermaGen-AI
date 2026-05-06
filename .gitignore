@@ -26,6 +26,7 @@ dist-ssr
 *.md
 !README.md
 .claude/
+.social/
 .dev/
 .playwright-mcp/
 knowledge/

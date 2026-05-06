@@ -1,4 +1,6 @@
 datetime,commit_hash,type,scope,description
+2026-05-02 15:00:00,pending,fix,properties,"Restore PropertiesPanel.tsx from stash (380→1527 lines): font family picker, font size/weight fields, and text alignment toggle (left/center/right) were all lost in the same April 30 merge conflict that affected Canvas.tsx"
+2026-05-02 14:00:00,pending,feat,canvas,"Multi-select group bounding box with resize handles: shared dashed border around all selected elements; 8 handles resize all elements simultaneously; no-modifier=uniform delta, Shift=proportional scale from anchor, Alt=from center, Shift+Alt=proportional from center"
 2026-05-02 12:00:00,pending,fix,canvas,"Restore Canvas.tsx from stash: recover double-click inline text editing and hover action toolbar (duplicate, delete, lock, wiki, reparent) lost in merge conflict resolution; add getGmodWikiUrl to componentDefinitions.ts"
 2026-05-02 00:00:00,HEAD,docs,readme,"Consolidate README: remove marketing copy and redundant sections; add API key configuration and provider-switching guide; add CHANGELOG"
 2026-04-30 17:24:39,fb638e0,chore,vcs,"Merge remote changes and resolve conflicts"

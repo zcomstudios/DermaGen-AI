@@ -43,6 +43,17 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
   const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // Holds start-of-drag snapshot for the group bounding-box resize. Using a ref
+  // (not state) so mousemove handlers don't trigger re-renders on every frame.
+  const groupResizeDragRef = useRef<{
+    startMouseX: number;
+    startMouseY: number;
+    // Props-space bounding box at drag start (parent-relative coords, same system as el.props.x/y).
+    startBounds: { px: number; py: number; w: number; h: number };
+    // Per-element snapshot in props space.
+    startElements: Map<string, { x: number; y: number; w: number; h: number }>;
+    dir: string;
+  } | null>(null);
   // Context menu: when non-null, an absolutely-positioned menu is shown.
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; elementId: string; submenu: 'parent' | null } | null>(null);
 
@@ -301,6 +312,79 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
           return <div key={dir} style={style} onMouseDown={(e) => onResizeStart(e, dir)} />;
       });
   };
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Multi-select group bounding box
+  // ─────────────────────────────────────────────────────────────────────────
+
+  interface GroupBounds {
+    // Absolute canvas coords — used to position the overlay div.
+    x: number; y: number; w: number; h: number;
+    // Props-space origin — used for resize math (parent-relative, same as el.props.x/y).
+    px: number; py: number;
+    ids: string[];
+  }
+
+  // Walk the parent chain to get an element's position in root canvas space.
+  // Does NOT account for CSS chrome offsets (DFrame title bar, etc.) — those are
+  // visual-only and don't affect props coordinates.
+  const getAbsoluteCanvasPos = (id: string): { x: number; y: number } => {
+    const el = state.elements[id];
+    if (!el) return { x: 0, y: 0 };
+    if (!el.parentId) return { x: el.props.x, y: el.props.y };
+    const p = getAbsoluteCanvasPos(el.parentId);
+    return { x: p.x + el.props.x, y: p.y + el.props.y };
+  };
+
+  const computeGroupBounds = (): GroupBounds | null => {
+    if (state.selectedIds.length < 2) return null;
+
+    // Filter to elements that can participate in a group resize.
+    const eligible = state.selectedIds.filter(id => {
+      const el = state.elements[id];
+      if (!el) return false;
+      if (isEffectivelyLocked(id)) return false;
+      const parent = el.parentId ? state.elements[el.parentId] : null;
+      if (parent?.props.layoutMode && parent.props.layoutMode !== 'none') return false;
+      if (parent?.type === ComponentType.DIconLayout) return false;
+      return true;
+    });
+
+    if (eligible.length < 2) return null;
+
+    // All must share the same parent so coordinates are in the same space.
+    const parentSet = new Set(eligible.map(id => state.elements[id].parentId));
+    if (parentSet.size > 1) return null;
+
+    // Compute props-space bounding box (parent-relative coords).
+    let minPX = Infinity, minPY = Infinity, maxPX = -Infinity, maxPY = -Infinity;
+    for (const id of eligible) {
+      const { x, y, w, h } = state.elements[id].props;
+      minPX = Math.min(minPX, x);
+      minPY = Math.min(minPY, y);
+      maxPX = Math.max(maxPX, x + w);
+      maxPY = Math.max(maxPY, y + h);
+    }
+
+    // Convert origin to absolute canvas space for rendering.
+    const firstAbs = getAbsoluteCanvasPos(eligible[0]);
+    const firstProps = state.elements[eligible[0]].props;
+    const parentAbsX = firstAbs.x - firstProps.x;
+    const parentAbsY = firstAbs.y - firstProps.y;
+
+    return {
+      x: minPX + parentAbsX,
+      y: minPY + parentAbsY,
+      w: maxPX - minPX,
+      h: maxPY - minPY,
+      px: minPX,
+      py: minPY,
+      ids: eligible,
+    };
+  };
+
+  // Declared here, assigned just before the return so renderElement can read it via closure.
+  let groupBounds: GroupBounds | null = null;
 
   const renderVGUIContent = (el: UIElement, isSelected: boolean) => {
       const baseText = "font-sans text-[11px] select-none";
@@ -1540,7 +1624,7 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
         onMouseEnter={() => setHoveredId(id)}
         onMouseLeave={() => setHoveredId(null)}
         title={el.props.tooltip} // Native Tooltip
-        className={`group select-none ${isSelected ? 'outline outline-2 outline-blue-500' : isMultiSelected ? 'outline-dashed outline-2 outline-blue-400/70' : ''}`}
+        className={`group select-none ${isSelected ? 'outline outline-2 outline-blue-500' : (isMultiSelected && !groupBounds) ? 'outline-dashed outline-2 outline-blue-400/70' : ''}`}
       >
         {renderVGUIContent(el, isSelected)}
 
@@ -2084,6 +2168,162 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
     );
   };
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // Group bounding-box resize overlay
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const renderMultiSelectBox = (bounds: GroupBounds) => {
+    const z = viewState.zoom;
+    const hs = 8 / z; // handle size in canvas units
+    const dirs = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'] as const;
+    const OUTSET = 4 / z; // gap between element edges and the overlay border
+
+    const onHandleMouseDown = (e: React.MouseEvent, dir: string) => {
+      e.stopPropagation();
+      e.preventDefault();
+
+      // Snapshot per-element start state in props space.
+      const startElements = new Map<string, { x: number; y: number; w: number; h: number }>();
+      for (const id of bounds.ids) {
+        const el = state.elements[id];
+        if (!el) continue;
+        startElements.set(id, { x: el.props.x, y: el.props.y, w: el.props.w, h: el.props.h });
+      }
+
+      groupResizeDragRef.current = {
+        startMouseX: e.clientX,
+        startMouseY: e.clientY,
+        startBounds: { px: bounds.px, py: bounds.py, w: bounds.w, h: bounds.h },
+        startElements,
+        dir,
+      };
+
+      const handleMouseMove = (mv: MouseEvent) => {
+        const drag = groupResizeDragRef.current;
+        if (!drag) return;
+        const { startBounds: sb, startElements: se, dir: d } = drag;
+
+        const rawDx = (mv.clientX - drag.startMouseX) / z;
+        const rawDy = (mv.clientY - drag.startMouseY) / z;
+        const isShift = mv.shiftKey;
+        const isAlt   = mv.altKey;
+
+        // ── Step 1: compute new bounding box in props space ──────────────
+        let newPx = sb.px, newPy = sb.py, newW = sb.w, newH = sb.h;
+
+        if (isAlt) {
+          // Scale from center: both opposite edges move symmetrically.
+          if (d.includes('e')) { newPx = sb.px - rawDx;  newW = Math.max(20, sb.w + rawDx * 2); }
+          if (d.includes('w')) { newPx = sb.px + rawDx;  newW = Math.max(20, sb.w - rawDx * 2); }
+          if (d.includes('s')) { newPy = sb.py - rawDy;  newH = Math.max(20, sb.h + rawDy * 2); }
+          if (d.includes('n')) { newPy = sb.py + rawDy;  newH = Math.max(20, sb.h - rawDy * 2); }
+        } else {
+          // Standard: pin the opposite edge.
+          if (d.includes('e')) newW = Math.max(10, sb.w + rawDx);
+          if (d.includes('s')) newH = Math.max(10, sb.h + rawDy);
+          if (d.includes('w')) { const δ = Math.min(sb.w - 10, rawDx); newPx = sb.px + δ; newW = sb.w - δ; }
+          if (d.includes('n')) { const δ = Math.min(sb.h - 10, rawDy); newPy = sb.py + δ; newH = sb.h - δ; }
+        }
+
+        // ── Step 2: compute per-element patches ───────────────────────────
+        const patches: Array<{ id: string; props: Partial<UIElement['props']> }> = [];
+
+        if (isShift) {
+          // Proportional: positions and sizes scale relative to the anchor corner (or center).
+          const scaleX = newW / sb.w;
+          const scaleY = newH / sb.h;
+          const anchorPx = isAlt ? sb.px + sb.w / 2 : (d.includes('w') ? sb.px + sb.w : sb.px);
+          const anchorPy = isAlt ? sb.py + sb.h / 2 : (d.includes('n') ? sb.py + sb.h : sb.py);
+
+          for (const [id, start] of se) {
+            patches.push({
+              id,
+              props: {
+                x: snap(anchorPx + (start.x - anchorPx) * scaleX),
+                y: snap(anchorPy + (start.y - anchorPy) * scaleY),
+                w: snap(Math.max(10, start.w * scaleX)),
+                h: snap(Math.max(10, start.h * scaleY)),
+              },
+            });
+          }
+        } else {
+          // Uniform delta: each element's matching edges shift by the same raw pixel amount.
+          for (const [id, start] of se) {
+            const p: Partial<UIElement['props']> = {};
+            if (isAlt) {
+              if (d.includes('e')) { p.x = snap(start.x - rawDx); p.w = snap(Math.max(10, start.w + rawDx * 2)); }
+              if (d.includes('w')) { p.x = snap(start.x + rawDx); p.w = snap(Math.max(10, start.w - rawDx * 2)); }
+              if (d.includes('s')) { p.y = snap(start.y - rawDy); p.h = snap(Math.max(10, start.h + rawDy * 2)); }
+              if (d.includes('n')) { p.y = snap(start.y + rawDy); p.h = snap(Math.max(10, start.h - rawDy * 2)); }
+            } else {
+              if (d.includes('e')) p.w = snap(Math.max(10, start.w + rawDx));
+              if (d.includes('s')) p.h = snap(Math.max(10, start.h + rawDy));
+              if (d.includes('w')) { const δ = Math.min(start.w - 10, rawDx); p.x = snap(start.x + δ); p.w = snap(start.w - δ); }
+              if (d.includes('n')) { const δ = Math.min(start.h - 10, rawDy); p.y = snap(start.y + δ); p.h = snap(start.h - δ); }
+            }
+            if (Object.keys(p).length) patches.push({ id, props: p });
+          }
+        }
+
+        if (patches.length) onPatchMany?.(patches);
+      };
+
+      const handleMouseUp = () => {
+        groupResizeDragRef.current = null;
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+      };
+
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    };
+
+    const cursorMap: Record<string, string> = {
+      n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize',
+      ne: 'nesw-resize', sw: 'nesw-resize', nw: 'nwse-resize', se: 'nwse-resize',
+    };
+
+    const handleStyle = (dir: string): React.CSSProperties => {
+      const base: React.CSSProperties = {
+        position: 'absolute', width: hs, height: hs,
+        backgroundColor: '#3b82f6', border: `${1 / z}px solid white`,
+        zIndex: 200, pointerEvents: 'auto', cursor: cursorMap[dir] || 'pointer',
+      };
+      if (dir === 'n')  { base.top = -hs / 2; base.left = '50%'; base.transform = 'translateX(-50%)'; }
+      if (dir === 's')  { base.bottom = -hs / 2; base.left = '50%'; base.transform = 'translateX(-50%)'; }
+      if (dir === 'w')  { base.left = -hs / 2; base.top = '50%'; base.transform = 'translateY(-50%)'; }
+      if (dir === 'e')  { base.right = -hs / 2; base.top = '50%'; base.transform = 'translateY(-50%)'; }
+      if (dir === 'nw') { base.top = -hs / 2; base.left = -hs / 2; }
+      if (dir === 'ne') { base.top = -hs / 2; base.right = -hs / 2; }
+      if (dir === 'sw') { base.bottom = -hs / 2; base.left = -hs / 2; }
+      if (dir === 'se') { base.bottom = -hs / 2; base.right = -hs / 2; }
+      return base;
+    };
+
+    return (
+      <div
+        style={{
+          position: 'absolute',
+          left: bounds.x - OUTSET,
+          top: bounds.y - OUTSET,
+          width: bounds.w + OUTSET * 2,
+          height: bounds.h + OUTSET * 2,
+          border: `${1 / z}px dashed rgba(59,130,246,0.85)`,
+          pointerEvents: 'none',
+          zIndex: 150,
+          boxSizing: 'border-box',
+        }}
+      >
+        {dirs.map(dir => (
+          <div key={dir} style={handleStyle(dir)} onMouseDown={(e) => onHandleMouseDown(e, dir)} />
+        ))}
+      </div>
+    );
+  };
+
+  // Assign groupBounds now — renderElement (called during the return) reads this via closure.
+  groupBounds = computeGroupBounds();
+
   return (
     <div className="flex-1 bg-[#151515] relative overflow-hidden flex flex-col">
        {/* Canvas Toolbar */}
@@ -2126,6 +2366,7 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
                         </div>
                     </div>
                 )}
+                {groupBounds && renderMultiSelectBox(groupBounds)}
             </div>
         </div>
         
