@@ -40,23 +40,23 @@ If you enjoy DermaGen AI and find it useful, consider a small donation to suppor
 
 1. File > New Project
 
-(screenshot_001.png)
+<a href="https://i.ibb.co/wF9c6BkG/Screenshot-001.png" target="_blank"><img src="https://i.ibb.co/wF9c6BkG/Screenshot-001.png" alt="Click New Project" width="auto" height="150"></a>
 
 2. Add a **DFrame** as the root (required)
 
-<a href="screenshot_002.png" target="_blank"><img src="screenshot_002.png" alt="Add DFrame" width="auto" height="150"></a>
+<a href="https://i.ibb.co/20jfdzX5/Screenshot-002.png" target="_blank"><img src="https://i.ibb.co/20jfdzX5/Screenshot-002.png" alt="Add DFrame" width="auto" height="150"></a>
 
 3. Adjust the grid-size to your preference to control snapping precision
 
-<a href="screenshot_003.png" target="_blank"><img src="screenshot_003.png" alt="New Project" width="auto" height="150"></a>
+<a href="https://i.ibb.co/zWR9f5ZT/Screenshot-003.png" target="_blank"><img src="https://i.ibb.co/zWR9f5ZT/Screenshot-003.png" alt="New Project" width="auto" height="150"></a>
 
 4. Add child components from the sidebar and Edit properties in the right panel
 
-<a href="screenshot_004.png" target="_blank"><img src="screenshot_004.png" alt="Add Components and Edit Properties" width="auto" height="150"></a>
+<a href="https://i.ibb.co/JjZnvy73/Screenshot-004.png" target="_blank"><img src="https://i.ibb.co/JjZnvy73/Screenshot-004.png" alt="Add Components and Edit Properties" width="auto" height="150"></a>
 
 5. Copy/export the generated Lua from the output panel, launch the game and test it:
 
-<a href="screenshot_005.png" target="_blank"><img src="screenshot_005.png" alt="Copy/Export Generated Lua" width="auto" height="150"></a>
+<a href="https://i.ibb.co/vCMVSyBR/Screenshot-005.png" target="_blank"><img src="https://i.ibb.co/vCMVSyBR/Screenshot-005.png" alt="Copy/Export Generated Lua" width="auto" height="150"></a>
   
 ## Testing Your Code In-Game
 
