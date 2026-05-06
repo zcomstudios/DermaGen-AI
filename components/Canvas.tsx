@@ -1,26 +1,169 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { EditorState, UIElement, ComponentType, ViewState } from '../types';
-import { ZoomIn, ZoomOut, Grid as GridIcon, ImageOff, Cuboid, ChevronDown, ChevronRight, Layers, Check, Folder, FileText, Menu as MenuIcon, EyeOff, Lock, ArrowDown, ArrowRight, Layout } from 'lucide-react';
+import { resolveDermaFont } from '../utils/dermaFonts';
+import { SKIN_DEFAULTS, getEffectiveParentBg, getReadableTextColor } from '../utils/skinDefaults';
+import { getGmodWikiUrl } from '../utils/componentDefinitions';
+import { ZoomIn, ZoomOut, Grid as GridIcon, ImageOff, Cuboid, X, Lock, LockOpen, Maximize2, Globe, Trash2, Settings2, Group, Ungroup, Minimize2, Link as LinkIcon, Unlink, ChevronRight, Copy as CopyIcon, Check, Square, Type as TypeIcon } from 'lucide-react';
+
+// Component types whose visible text can be edited inline by double-clicking.
+const TEXT_EDITABLE_TYPES = new Set<ComponentType>([
+  ComponentType.DLabel,
+  ComponentType.DButton,
+  ComponentType.DTextEntry,
+  ComponentType.DCheckBox,
+  ComponentType.DComboBox,
+  ComponentType.DFrame,
+  ComponentType.DForm,
+  ComponentType.DNumSlider, // editable label
+  ComponentType.DCollapsibleCategory, // editable header
+]);
 
 interface CanvasProps {
   state: EditorState;
   viewState: ViewState;
   onSelect: (id: string | null) => void;
+  onToggleSelection?: (id: string) => void;
+  onSelectMany?: (ids: string[]) => void;
   onUpdateElement: (id: string, updates: Partial<UIElement['props']>) => void;
+  onPatchMany?: (patches: Array<{ id: string; props: Partial<UIElement['props']> }>) => void;
   onViewChange: (newView: ViewState) => void;
   onDeleteElement?: (id: string) => void;
+  onDeleteMany?: (ids: string[]) => void;
+  onReparent?: (id: string, newParentId: string | null) => void;
+  onGroup?: (id: string) => void;
+  onUngroup?: (id: string) => void;
+  onShrinkToFit?: (id: string) => void;
+  onUnparent?: (id: string) => void;
+  onDuplicate?: () => void;
 }
 
-const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateElement, onViewChange, onDeleteElement }) => {
+const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSelection, onSelectMany, onUpdateElement, onPatchMany, onViewChange, onDeleteElement, onDeleteMany, onReparent, onGroup, onUngroup, onShrinkToFit, onUnparent, onDuplicate }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [isPanning, setIsPanning] = useState(false);
   const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  // Holds start-of-drag snapshot for the group bounding-box resize. Using a ref
+  // (not state) so mousemove handlers don't trigger re-renders on every frame.
+  const groupResizeDragRef = useRef<{
+    startMouseX: number;
+    startMouseY: number;
+    // Props-space bounding box at drag start (parent-relative coords, same system as el.props.x/y).
+    startBounds: { px: number; py: number; w: number; h: number };
+    // Per-element snapshot in props space.
+    startElements: Map<string, { x: number; y: number; w: number; h: number }>;
+    dir: string;
+  } | null>(null);
+  // Context menu: when non-null, an absolutely-positioned menu is shown.
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; elementId: string; submenu: 'parent' | null } | null>(null);
 
   const snap = (val: number) => {
       if (!viewState.showGrid) return val;
       const s = viewState.gridSize;
       return Math.round(val / s) * s;
+  };
+
+  // An element is effectively locked if it OR any ancestor has props.locked === true.
+  // This walks the parent chain so locking a DFrame freezes its whole subtree.
+  const isEffectivelyLocked = (id: string): boolean => {
+    let curr: UIElement | undefined = state.elements[id];
+    while (curr) {
+      if (curr.props.locked) return true;
+      curr = curr.parentId ? state.elements[curr.parentId] : undefined;
+    }
+    return false;
+  };
+
+  // Usable inner area of a parent element, returned as {x, y, w, h} so callers
+  // can both POSITION and SIZE children to fit the chrome-free area.
+  //
+  // In actual gmod, child positions like :SetPos(5,5) are relative to the
+  // parent's TOP-LEFT (including any title bar / header), so the editor honors
+  // raw coords as-is in renderElement. The chrome offsets here are only used by
+  // "Fill Parent" — that action smartly snaps a child below the title bar so
+  // the user gets the obviously-intended result.
+  const getInnerArea = (parent: UIElement): { x: number; y: number; w: number; h: number } => {
+    const { w, h } = parent.props;
+    switch (parent.type) {
+      case ComponentType.DFrame:          return { x: 0, y: 24, w, h: Math.max(0, h - 24) };
+      case ComponentType.DPropertySheet:  return { x: 4, y: 28, w: Math.max(0, w - 8), h: Math.max(0, h - 32) };
+      case ComponentType.DForm:           return { x: 4, y: 28, w: Math.max(0, w - 8), h: Math.max(0, h - 32) };
+      case ComponentType.DCollapsibleCategory: {
+        const headerH = parent.props.headerHeight ?? 20;
+        return { x: 0, y: headerH, w, h: Math.max(0, h - headerH) };
+      }
+      default:                             return { x: 0, y: 0, w, h };
+    }
+  };
+
+  const fillParent = (id: string) => {
+    const el = state.elements[id];
+    if (!el || !el.parentId) return;
+    const parent = state.elements[el.parentId];
+    if (!parent) return;
+    const { x, y, w, h } = getInnerArea(parent);
+    onUpdateElement(id, { x, y, w, h });
+  };
+
+  const toggleLock = (id: string) => {
+    const el = state.elements[id];
+    if (!el) return;
+    onUpdateElement(id, { locked: !el.props.locked });
+  };
+
+  // Renders the text of an element either as a static <span> or, when this
+  // element is being edited (double-click), as an inline <input> that mirrors
+  // the span's classes/styles so the visual stays consistent.
+  // Commits on Enter or blur; Escape cancels without persisting.
+  const editableText = (
+    el: UIElement,
+    text: string,
+    className: string,
+    style: React.CSSProperties,
+  ) => {
+    if (editingId !== el.id) {
+      return <span className={className} style={style}>{text}</span>;
+    }
+    return (
+      <input
+        autoFocus
+        defaultValue={text}
+        className={className}
+        style={{
+          ...style,
+          background: 'rgba(59,130,246,0.18)',
+          outline: '1px solid #3b82f6',
+          outlineOffset: '-1px',
+          color: (style as any).color || 'inherit',
+          // Behave well in either flex or block parents: take available space
+          // but yield to siblings (close button, dropdown arrow, etc).
+          flex: '1 1 auto',
+          minWidth: 0,
+          width: 'auto',
+          padding: 0,
+          margin: 0,
+          border: 'none',
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+        onFocus={(e) => e.currentTarget.select()}
+        onBlur={(e) => {
+          onUpdateElement(el.id, { text: e.currentTarget.value });
+          setEditingId(null);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            (e.currentTarget as HTMLInputElement).blur();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            setEditingId(null);
+          }
+          e.stopPropagation();
+        }}
+      />
+    );
   };
 
   const handleWheel = (e: React.WheelEvent) => {
@@ -44,10 +187,27 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
         setLastMousePos({ x: e.clientX, y: e.clientY });
         e.stopPropagation();
     } else if (e.button === 0 && e.target === containerRef.current) {
-        // Only deselect if clicking strictly on the canvas background
         onSelect(null);
     }
   };
+
+  // Dismiss the context menu on any outside click or Escape.
+  useEffect(() => {
+    if (!contextMenu) return;
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-context-menu]')) setContextMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setContextMenu(null);
+    };
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [contextMenu]);
 
   useEffect(() => {
     const handleGlobalMouseMove = (e: MouseEvent) => {
@@ -78,13 +238,11 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
   }, [isPanning, lastMousePos, viewState, onViewChange]);
 
   const renderResizeHandles = (el: UIElement) => {
+      // Don't show handles if element is in an auto-layout container
       const parent = el.parentId ? state.elements[el.parentId] : null;
-      if (parent && ((parent.props.layoutMode && parent.props.layoutMode !== 'none') || parent.type === ComponentType.DIconLayout || parent.type === ComponentType.DCollapsibleCategory)) {
-           if (el.props.autoLayoutBehavior === 'fill') return null;
-      }
-      
-      // DFrame sizable check
-      if (el.type === ComponentType.DFrame && el.props.sizable === false) return null;
+      if (parent && parent.props.layoutMode && parent.props.layoutMode !== 'none') return null;
+      // Don't show handles if locked (self or via ancestor) — locking forbids resize.
+      if (isEffectivelyLocked(el.id)) return null;
 
       const handles = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
       const size = 8 / viewState.zoom;
@@ -98,6 +256,7 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
           const handleResizeMove = (moveEvent: MouseEvent) => {
               const dx = (moveEvent.clientX - startX) / viewState.zoom;
               const dy = (moveEvent.clientY - startY) / viewState.zoom;
+              
               const newProps = { ...startProps };
 
               if (dir.includes('e')) newProps.w = Math.max(10, startProps.w + dx);
@@ -117,6 +276,7 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
               newProps.y = snap(newProps.y);
               newProps.w = snap(newProps.w);
               newProps.h = snap(newProps.h);
+
               onUpdateElement(el.id, newProps);
           };
 
@@ -131,22 +291,100 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
 
       return handles.map(dir => {
           const style: React.CSSProperties = {
-              position: 'absolute', width: size, height: size,
-              backgroundColor: '#3b82f6', border: '1px solid white',
-              zIndex: 50, cursor: `${dir}-resize`
+              position: 'absolute',
+              width: size,
+              height: size,
+              backgroundColor: '#3b82f6',
+              border: '1px solid white',
+              zIndex: 50,
+              pointerEvents: 'auto'
           };
+          
           if (dir === 'n') { style.top = -size/2; style.left = '50%'; style.transform = 'translateX(-50%)'; style.cursor = 'ns-resize'; }
           if (dir === 's') { style.bottom = -size/2; style.left = '50%'; style.transform = 'translateX(-50%)'; style.cursor = 'ns-resize'; }
           if (dir === 'w') { style.left = -size/2; style.top = '50%'; style.transform = 'translateY(-50%)'; style.cursor = 'ew-resize'; }
           if (dir === 'e') { style.right = -size/2; style.top = '50%'; style.transform = 'translateY(-50%)'; style.cursor = 'ew-resize'; }
-          if (dir.includes('nw')) { style.top = -size/2; style.left = -size/2; }
-          if (dir.includes('ne')) { style.top = -size/2; style.right = -size/2; }
-          if (dir.includes('sw')) { style.bottom = -size/2; style.left = -size/2; }
-          if (dir.includes('se')) { style.bottom = -size/2; style.right = -size/2; }
+          if (dir === 'nw') { style.top = -size/2; style.left = -size/2; style.cursor = 'nwse-resize'; }
+          if (dir === 'ne') { style.top = -size/2; style.right = -size/2; style.cursor = 'nesw-resize'; }
+          if (dir === 'sw') { style.bottom = -size/2; style.left = -size/2; style.cursor = 'nesw-resize'; }
+          if (dir === 'se') { style.bottom = -size/2; style.right = -size/2; style.cursor = 'nwse-resize'; }
 
           return <div key={dir} style={style} onMouseDown={(e) => onResizeStart(e, dir)} />;
       });
   };
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Multi-select group bounding box
+  // ─────────────────────────────────────────────────────────────────────────
+
+  interface GroupBounds {
+    // Absolute canvas coords — used to position the overlay div.
+    x: number; y: number; w: number; h: number;
+    // Props-space origin — used for resize math (parent-relative, same as el.props.x/y).
+    px: number; py: number;
+    ids: string[];
+  }
+
+  // Walk the parent chain to get an element's position in root canvas space.
+  // Does NOT account for CSS chrome offsets (DFrame title bar, etc.) — those are
+  // visual-only and don't affect props coordinates.
+  const getAbsoluteCanvasPos = (id: string): { x: number; y: number } => {
+    const el = state.elements[id];
+    if (!el) return { x: 0, y: 0 };
+    if (!el.parentId) return { x: el.props.x, y: el.props.y };
+    const p = getAbsoluteCanvasPos(el.parentId);
+    return { x: p.x + el.props.x, y: p.y + el.props.y };
+  };
+
+  const computeGroupBounds = (): GroupBounds | null => {
+    if (state.selectedIds.length < 2) return null;
+
+    // Filter to elements that can participate in a group resize.
+    const eligible = state.selectedIds.filter(id => {
+      const el = state.elements[id];
+      if (!el) return false;
+      if (isEffectivelyLocked(id)) return false;
+      const parent = el.parentId ? state.elements[el.parentId] : null;
+      if (parent?.props.layoutMode && parent.props.layoutMode !== 'none') return false;
+      if (parent?.type === ComponentType.DIconLayout) return false;
+      return true;
+    });
+
+    if (eligible.length < 2) return null;
+
+    // All must share the same parent so coordinates are in the same space.
+    const parentSet = new Set(eligible.map(id => state.elements[id].parentId));
+    if (parentSet.size > 1) return null;
+
+    // Compute props-space bounding box (parent-relative coords).
+    let minPX = Infinity, minPY = Infinity, maxPX = -Infinity, maxPY = -Infinity;
+    for (const id of eligible) {
+      const { x, y, w, h } = state.elements[id].props;
+      minPX = Math.min(minPX, x);
+      minPY = Math.min(minPY, y);
+      maxPX = Math.max(maxPX, x + w);
+      maxPY = Math.max(maxPY, y + h);
+    }
+
+    // Convert origin to absolute canvas space for rendering.
+    const firstAbs = getAbsoluteCanvasPos(eligible[0]);
+    const firstProps = state.elements[eligible[0]].props;
+    const parentAbsX = firstAbs.x - firstProps.x;
+    const parentAbsY = firstAbs.y - firstProps.y;
+
+    return {
+      x: minPX + parentAbsX,
+      y: minPY + parentAbsY,
+      w: maxPX - minPX,
+      h: maxPY - minPY,
+      px: minPX,
+      py: minPY,
+      ids: eligible,
+    };
+  };
+
+  // Declared here, assigned just before the return so renderElement can read it via closure.
+  let groupBounds: GroupBounds | null = null;
 
   const renderVGUIContent = (el: UIElement, isSelected: boolean) => {
       const baseText = "font-sans text-[11px] select-none";
@@ -155,292 +393,987 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
       // Dynamic styles based on props
       const bgColor = (isHovered && el.props.hoverColor) ? el.props.hoverColor : el.props.color;
       const borderColor = (isHovered && el.props.hoverBorderColor) ? el.props.hoverBorderColor : el.props.borderColor;
-      const borderWidth = (isHovered && el.props.hoverBorderWidth !== undefined) ? el.props.hoverBorderWidth : (el.props.borderWidth || 0);
       const opacity = (isHovered && el.props.hoverOpacity !== undefined) ? el.props.hoverOpacity / 255 : (el.props.opacity !== undefined ? el.props.opacity / 255 : 1);
       
       const textShadowStyle = (el.props.textShadow && el.props.textShadowColor) 
           ? `${el.props.textShadowOffset || 1}px ${el.props.textShadowOffset || 1}px 0px ${el.props.textShadowColor}`
           : undefined;
 
+      // Resolve the Derma font name to a real CSS font-family + default size + weight.
+      // The user's per-element fontSize/fontWeight overrides apply when truthy.
+      const resolvedFont = resolveDermaFont(el.props.fontFamily, el.props.fontSize, el.props.fontWeight);
+
       const commonStyle: React.CSSProperties = {
-          backgroundColor: bgColor || 'transparent',
+          backgroundColor: bgColor,
           borderColor: borderColor || 'transparent',
-          borderWidth: `${borderWidth}px`,
-          borderStyle: borderWidth > 0 ? 'solid' : 'none',
+          borderWidth: el.props.borderWidth ? `${el.props.borderWidth}px` : '0px',
+          borderStyle: (el.props.borderWidth && el.props.borderWidth > 0) ? 'solid' : 'none',
           borderRadius: el.props.borderRadius ? `${el.props.borderRadius}px` : '0px',
+          justifyContent: el.props.textAlign === 'center' ? 'center' : el.props.textAlign === 'right' ? 'flex-end' : 'flex-start',
           opacity: opacity,
-          fontFamily: el.props.fontFamily || 'Arial, sans-serif',
-          fontSize: el.props.fontSize ? `${el.props.fontSize}px` : undefined,
-          fontWeight: el.props.fontWeight,
+          fontFamily: resolvedFont.family,
+          fontSize: `${resolvedFont.size}px`,
+          fontWeight: resolvedFont.weight,
           textShadow: textShadowStyle,
-          color: 'white', 
+      };
+
+      const titleBarStyle: React.CSSProperties = {
+          fontFamily: resolvedFont.family,
+          fontSize: `${resolvedFont.size}px`,
+          fontWeight: resolvedFont.weight,
       };
 
       switch (el.type) {
-          case ComponentType.DFrame:
+          case ComponentType.DFrame: {
               const titleColor = el.props.titleBarColor || '#2a2a2a';
+              const blurStyle: React.CSSProperties = el.props.frameBackgroundBlur
+                  ? { boxShadow: '0 0 0 2px rgba(0,0,0,0.6), 0 8px 32px rgba(0,0,0,0.6)', backdropFilter: 'blur(2px)' }
+                  : {};
               return (
-                  <div className="flex flex-col h-full w-full bg-[#323232] shadow-xl overflow-hidden rounded-sm" style={commonStyle}>
-                      <div className="h-6 flex items-center px-2 shrink-0 rounded-t-sm" style={{ backgroundColor: titleColor }}>
-                          <span className={`${baseText} text-white/90 font-bold truncate max-w-[80%]`} style={{textShadow: textShadowStyle}}>{el.props.text || 'DFrame'}</span>
-                          <div className="ml-auto flex gap-1">
+                  <div
+                      className="flex flex-col h-full w-full bg-[#323232] shadow-xl"
+                      style={{ ...commonStyle, backgroundColor: bgColor || '#323232', overflow: 'hidden', ...blurStyle }}
+                  >
+                      <div
+                        className="h-6 flex items-center px-2 border-b border-black/40 shrink-0 dframe-titlebar gap-1.5"
+                        style={{ backgroundColor: titleColor }}
+                      >
+                          {el.props.frameIcon && (
+                              <span
+                                  className="inline-block bg-yellow-200 border border-yellow-600 shrink-0"
+                                  style={{ width: 14, height: 14 }}
+                                  title={el.props.frameIcon}
+                              />
+                          )}
+                          {editableText(el, el.props.text || 'DFrame', `${baseText} text-white/90 font-bold`, titleBarStyle)}
+                          <div className="ml-auto flex gap-1 opacity-60">
+                              <div className="w-3 h-3 bg-white/10 rounded-sm hover:bg-white/20"></div>
                               {el.props.showCloseButton !== false && (
-                                <div className="w-3.5 h-3.5 bg-white/10 rounded-sm hover:bg-red-500/80 cursor-pointer pointer-events-auto flex items-center justify-center" onClick={(e) => { e.stopPropagation(); onDeleteElement?.(el.id); }}>
-                                    <span className="text-[8px] leading-none">×</span>
-                                </div>
+                                <div
+                                    className="w-3 h-3 bg-white/10 rounded-sm hover:bg-red-500/80 cursor-pointer pointer-events-auto"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (onDeleteElement) onDeleteElement(el.id);
+                                    }}
+                                    title="Close"
+                                ></div>
                               )}
                           </div>
                       </div>
-                      <div className="flex-1 relative bg-transparent" />
+                      <div className="flex-1 relative overflow-hidden bg-transparent">
+                          {/* Children area */}
+                      </div>
                   </div>
               );
-          case ComponentType.DButton:
+          }
+          
+          case ComponentType.DButton: {
+              // Default Derma skin paints DButton light gray with dark text.
+              // Custom `color` prop overrides bg; text color is auto-derived
+              // from the resulting bg luminance so it stays readable across
+              // both light defaults and user-set dark themes.
+              const disabled = el.props.buttonEnabled === false;
+              const buttonBg = bgColor
+                  ?? (disabled ? SKIN_DEFAULTS.buttonDisabled
+                              : (isHovered ? SKIN_DEFAULTS.buttonHover : SKIN_DEFAULTS.buttonNormal));
+              const buttonText = getReadableTextColor(buttonBg);
               return (
-                  <div className="w-full h-full bg-[#f0f0f0] border border-[#999999] flex items-center justify-center px-2 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.5)] rounded-[2px]" style={{...commonStyle, backgroundColor: isHovered ? '#e1e1e1' : '#f0f0f0', color: 'black'}}>
-                      <span className={baseText} style={{textShadow: textShadowStyle, textAlign: el.props.textAlign || 'center'}}>{el.props.text || 'Button'}</span>
+                  <div
+                      className="w-full h-full border border-black/50 flex items-center shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] px-2 gap-1.5"
+                      style={{
+                          ...commonStyle,
+                          backgroundColor: buttonBg,
+                          opacity: disabled ? 0.5 : (commonStyle.opacity ?? 1),
+                          cursor: disabled ? 'not-allowed' : 'pointer',
+                      }}
+                      title={el.props.buttonConsoleCommand ? `console: ${el.props.buttonConsoleCommand}` : undefined}
+                  >
+                      {el.props.buttonIcon && (
+                          <span
+                              className="inline-block bg-yellow-200 border border-yellow-600 shrink-0"
+                              style={{ width: 14, height: 14 }}
+                              title={el.props.buttonIcon}
+                          />
+                      )}
+                      {editableText(el, el.props.text || 'Button', `${baseText} w-full text-center`, { ...commonStyle, color: buttonText })}
                   </div>
               );
-          case ComponentType.DBinder:
-               return (
-                  <div className="w-full h-full bg-[#505050] border border-black/50 flex items-center justify-center px-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] rounded-[3px]" style={commonStyle}>
-                      <span className={baseText} style={{textShadow: textShadowStyle, textAlign: el.props.textAlign || 'center', color: '#d0d0d0'}}>{el.props.text || 'NONE'}</span>
-                  </div>
-              );
-          case ComponentType.DLabel:
+          }
+          
+          case ComponentType.DTextEntry: {
+              const textColor = el.props.entryTextColor || 'black';
+              const isMulti = !!el.props.entryMultiline;
+              const value = el.props.text || '';
+              const placeholder = el.props.entryPlaceholderText || '';
+              const showPlaceholder = !value && placeholder && editingId !== el.id;
+              const showCursor = !value && !placeholder && editingId !== el.id && !isMulti;
+
+              if (isMulti) {
+                  // Multi-line preview: bounded text area, top-aligned, wraps text.
+                  return (
+                      <div
+                          className="w-full h-full bg-white border border-neutral-400 shadow-inner overflow-hidden"
+                          style={{ borderRadius: commonStyle.borderRadius }}
+                      >
+                          <div
+                              style={{
+                                  width: '100%',
+                                  height: '100%',
+                                  padding: '4px 6px',
+                                  whiteSpace: 'pre-wrap',
+                                  overflowY: 'auto',
+                                  fontFamily: commonStyle.fontFamily,
+                                  fontSize: commonStyle.fontSize,
+                                  color: showPlaceholder ? '#999' : textColor,
+                              }}
+                          >
+                              {showPlaceholder ? placeholder : (value || ' ')}
+                          </div>
+                      </div>
+                  );
+              }
+
+              // Single-line (existing behavior + placeholder + textColor)
               return (
-                  <div className="w-full h-full flex items-center" style={{ ...commonStyle, backgroundColor: 'transparent', border: 'none' }}>
-                       <span className={baseText} style={{ ...commonStyle, textShadow: textShadowStyle, textAlign: el.props.textAlign || 'left', width: '100%' }}>{el.props.text || 'Label'}</span>
+                  <div className="w-full h-full bg-white border border-neutral-400 flex items-center px-1.5 shadow-inner" style={{borderRadius: commonStyle.borderRadius}}>
+                      {showPlaceholder ? (
+                          <span className={`${baseText} truncate w-full`} style={{ color: '#999', fontFamily: commonStyle.fontFamily, fontSize: commonStyle.fontSize }}>{placeholder}</span>
+                      ) : (
+                          editableText(el, value, `${baseText} truncate w-full`, {...commonStyle, backgroundColor: 'transparent', borderWidth: 0, color: textColor})
+                      )}
+                      {showCursor && <div className="w-[1px] h-3 bg-black animate-pulse"></div>}
                   </div>
               );
+          }
+          
           case ComponentType.DCheckBox:
               return (
-                  <div className="flex items-center gap-2 h-full" style={{ opacity: commonStyle.opacity }}>
-                      <div 
-                        className={`w-3.5 h-3.5 rounded-[2px] border border-[#999999] bg-white flex items-center justify-center shadow-inner cursor-pointer pointer-events-auto`}
-                        onClick={(e) => {
-                            if (isSelected) {
-                                e.stopPropagation();
-                                onUpdateElement(el.id, { checked: !el.props.checked });
-                            }
-                        }}
-                      >
-                          {el.props.checked && (
-                              <div className="text-black font-bold text-[10px] leading-none">✓</div>
-                          )}
+                  <div className="flex items-center gap-1.5 h-full" style={{opacity: commonStyle.opacity}}>
+                      <div className="w-4 h-4 bg-white border border-neutral-400 flex items-center justify-center shadow-sm shrink-0">
+                          {el.props.checked && <div className="w-2.5 h-2.5 bg-[#3399FF] shadow-sm"></div>}
                       </div>
-                      <span className={`${baseText}`} style={{ fontFamily: commonStyle.fontFamily, fontSize: commonStyle.fontSize, color: 'inherit' }}>{el.props.text || 'CheckBox'}</span>
+                      {editableText(el, el.props.text || 'CheckBox', `${baseText} text-white`, {fontFamily: commonStyle.fontFamily, fontSize: commonStyle.fontSize, fontWeight: commonStyle.fontWeight})}
                   </div>
               );
-          case ComponentType.DComboBox:
-              return (
-                  <div className="w-full h-full bg-gradient-to-b from-white to-[#dddddd] border border-[#888888] flex items-center justify-between px-2 shadow-sm rounded-[2px]" style={{...commonStyle, color: 'black'}}>
-                      <span className={`${baseText} truncate`}>{el.props.text || 'Select...'}</span>
-                      <ChevronDown className="w-3 h-3 text-black/70" />
-                  </div>
-              );
-          case ComponentType.DListView:
-               return (
-                  <div className="w-full h-full bg-white border border-[#999] flex flex-col shadow-inner overflow-hidden" style={{ ...commonStyle, backgroundColor: 'white' }}>
-                      <div className="h-4 bg-gradient-to-b from-[#f0f0f0] to-[#d0d0d0] border-b border-[#888] flex shrink-0 divide-x divide-[#a0a0a0]">
-                          <div className="flex-1 px-1 flex items-center hover:bg-white/20"><span className="text-[10px] text-black font-medium">Column 1</span></div>
-                          <div className="flex-1 px-1 flex items-center hover:bg-white/20"><span className="text-[10px] text-black font-medium">Column 2</span></div>
-                      </div>
-                      <div className="flex-1 bg-white flex flex-col overflow-y-auto">
-                           <div className="flex h-4 border-b border-[#eee] text-black items-center hover:bg-[#3399ff] hover:text-white group"><div className="flex-1 px-1 text-[9px]">Item 1</div><div className="flex-1 px-1 text-[9px]">Data</div></div>
-                           <div className="flex h-4 border-b border-[#eee] text-black items-center hover:bg-[#3399ff] hover:text-white group"><div className="flex-1 px-1 text-[9px]">Item 2</div><div className="flex-1 px-1 text-[9px]">Data</div></div>
-                      </div>
-                  </div>
-              );
-          case ComponentType.DPropertySheet:
-              return (
-                  <div className="w-full h-full flex flex-col" style={commonStyle}>
-                      <div className="flex px-1 gap-0.5 overflow-hidden h-[18px]">
-                          <div className="bg-[#f0f0f0] text-black text-[10px] px-2 rounded-t-[3px] border-t border-l border-r border-[#999] flex items-center h-full relative z-10 -mb-[1px] pb-[1px]">Active</div>
-                          <div className="bg-[#dcdcdc] text-[#666] text-[10px] px-2 rounded-t-[3px] border-t border-l border-r border-[#999] flex items-center h-[16px] mt-[2px] hover:bg-[#e8e8e8]">Inactive</div>
-                      </div>
-                      <div className="flex-1 bg-[#f0f0f0] border border-[#999] relative rounded-b-[2px] rounded-tr-[2px]" />
-                  </div>
-              );
-          case ComponentType.DColumnSheet:
-              return (
-                   <div className="w-full h-full flex bg-[#f0f0f0] border border-[#999] rounded-[2px]" style={commonStyle}>
-                       <div className="w-1/4 bg-white border-r border-[#999] flex flex-col p-1 gap-1">
-                            <div className="h-5 bg-[#e1e1e1] rounded-sm w-full border border-transparent hover:border-[#ccc] flex items-center px-1 text-black text-[9px]">Option 1</div>
-                            <div className="h-5 rounded-sm w-full border border-transparent hover:border-[#ccc] hover:bg-[#f5f5f5] flex items-center px-1 text-black text-[9px]">Option 2</div>
+
+          case ComponentType.DLabel:
+               // Font is already resolved into commonStyle by resolveDermaFont above.
+               // Text color: explicit `labelTextColor` wins; otherwise derive a
+               // readable color from the parent's effective background. Falls
+               // back to white only if there's no parent at all.
+               {
+                   const parentBg = getEffectiveParentBg(el, state.elements);
+                   const labelColor = el.props.labelTextColor
+                       ?? (parentBg ? getReadableTextColor(parentBg) : '#ffffff');
+                   const labelStyle: React.CSSProperties = {
+                       ...commonStyle,
+                       color: labelColor,
+                   };
+                   return (
+                       <div className="w-full h-full flex items-center" style={{ ...commonStyle, backgroundColor: 'transparent', border: 'none' }}>
+                            {editableText(el, el.props.text || 'Label', baseText, labelStyle)}
                        </div>
-                       <div className="flex-1 p-2 bg-[#f0f0f0]">
-                           <div className="border border-[#ccc] w-full h-full bg-[#f9f9f9]"></div>
-                       </div>
-                  </div>
-              );
-          case ComponentType.DScrollPanel:
-              return (
-                  <div className="w-full h-full bg-transparent border border-transparent relative" style={commonStyle}>
-                      <div className="absolute top-0 right-0 bottom-0 w-3.5 bg-[#f0f0f0] border-l border-[#ccc] flex flex-col items-center">
-                          <div className="w-full h-3.5 bg-[#e0e0e0] border-b border-[#ccc] flex items-center justify-center text-[8px] text-[#666]">▲</div>
-                          <div className="w-full flex-1 bg-[#e0e0e0]/30 py-0.5 px-[2px]">
-                               <div className="w-full h-8 bg-[#cdcdcd] rounded-[2px] border border-[#aaa]" />
-                          </div>
-                          <div className="w-full h-3.5 bg-[#e0e0e0] border-t border-[#ccc] flex items-center justify-center text-[8px] text-[#666]">▼</div>
-                      </div>
-                  </div>
-              );
-          case ComponentType.DTree:
-              return (
-                  <div className="w-full h-full bg-white border border-[#999] flex flex-col p-1 overflow-hidden font-sans shadow-inner" style={{ ...commonStyle, backgroundColor: 'white', color: 'black' }}>
-                      <div className="flex flex-col gap-0.5">
-                          <div className="flex items-center gap-1 px-1 py-0.5 hover:bg-[#e0e0e0] cursor-pointer group">
-                              <div className="w-2.5 h-2.5 border border-[#ababab] bg-white flex items-center justify-center text-[7px] text-black shadow-sm">-</div>
-                              <Folder className="w-3.5 h-3.5 text-[#e6b800] fill-[#e6b800]" />
-                              <span className="text-[11px] text-black">models</span>
-                          </div>
-                          <div className="flex items-center gap-1 px-1 py-0.5 pl-5 bg-[#3399FF] text-white cursor-pointer border border-[#3399FF] rounded-sm">
-                              <div className="w-2.5 h-2.5 border border-[#ababab] bg-white flex items-center justify-center text-[7px] text-black shadow-sm" style={{borderColor: '#888'}}>-</div>
-                              <Folder className="w-3.5 h-3.5 text-white fill-white/20" />
-                              <span className="text-[11px]">weapons</span>
-                          </div>
-                          <div className="flex items-center gap-1 px-1 py-0.5 pl-9 hover:bg-[#e0e0e0] cursor-pointer">
-                              <div className="w-2.5 h-2.5" />
-                              <FileText className="w-3 h-3 text-neutral-500" />
-                              <span className="text-[11px] text-black">w_pistol.mdl</span>
-                          </div>
-                      </div>
-                  </div>
-              );
-          case ComponentType.DCollapsibleCategory:
-              return (
-                  <div className="w-full h-full flex flex-col bg-white overflow-hidden border border-[#a0a0a0] shadow-sm" style={commonStyle}>
-                       <div className="h-5 bg-gradient-to-b from-[#f0f0f0] to-[#d0d0d0] border-b border-[#a0a0a0] px-1 flex items-center justify-between cursor-pointer">
-                           <span className="text-[10px] text-black font-bold pl-1">{el.props.text || "Category"}</span>
-                           <div className="w-3.5 h-3.5 flex items-center justify-center bg-white border border-neutral-400 rounded-sm text-black text-[8px] hover:border-blue-400">{el.props.expanded !== false ? '-' : '+'}</div>
-                       </div>
-                       <div className="flex-1 bg-[#f9f9f9] relative p-1" />
-                  </div>
-              );
+                   );
+               }
+               
           case ComponentType.DImage:
               return (
                   <div className="w-full h-full overflow-hidden relative" style={commonStyle}>
                       {el.props.imageUrl ? (
-                        <div className="absolute inset-0" style={{ backgroundColor: el.props.imageColor || 'transparent' }}>
-                            <img src={el.props.imageUrl} alt="" className={`w-full h-full ${el.props.keepAspect ? 'object-contain' : 'object-cover'}`} style={{ mixBlendMode: el.props.imageColor ? 'multiply' : 'normal' }} />
-                        </div>
+                          <>
+                            {/* Wrapper for tinting using blend mode */}
+                            <div className="absolute inset-0 z-0" style={{ backgroundColor: el.props.imageColor || 'transparent' }}>
+                                <img 
+                                    src={el.props.imageUrl} 
+                                    alt="DImage" 
+                                    className="w-full h-full object-cover pointer-events-none" 
+                                    style={{ mixBlendMode: el.props.imageColor ? 'multiply' : 'normal' }}
+                                />
+                            </div>
+                          </>
                       ) : (
-                        <div className="w-full h-full flex items-center justify-center bg-neutral-800 text-neutral-600 border border-dashed border-neutral-700">
-                             <ImageOff className="w-6 h-6" />
-                        </div>
+                          <div className="w-full h-full flex flex-col items-center justify-center bg-neutral-800 text-neutral-600 border border-dashed border-neutral-700">
+                             <ImageOff className="w-6 h-6 mb-1 opacity-50" />
+                             <span className="text-[9px]">No Image</span>
+                          </div>
                       )}
                   </div>
               );
+          
           case ComponentType.DModelPanel:
               return (
-                  <div className="w-full h-full bg-[#222] border border-[#666] flex flex-col items-center justify-center relative overflow-hidden shadow-inner" style={{...commonStyle, backgroundColor: '#222'}}>
-                       <Cuboid className="w-10 h-10 text-neutral-500 mb-2 opacity-40" />
-                       <div className="absolute top-1 right-1 text-[8px] text-[#666] font-bold border border-[#444] px-1 rounded bg-[#333]">3D</div>
+                  <div className="w-full h-full bg-[#1a1a1a] border border-neutral-700 flex flex-col items-center justify-center relative overflow-hidden" style={commonStyle}>
+                       <Cuboid className="w-8 h-8 text-neutral-600 mb-2 opacity-50" />
+                       <span className="text-[9px] text-neutral-500 font-mono text-center px-1 break-all">{el.props.modelPath || "No Model"}</span>
+                       <div className="absolute top-1 right-1 text-[8px] text-neutral-600">3D</div>
                   </div>
               );
-          case ComponentType.DNumSlider:
+              
+          case ComponentType.DForm:
               return (
-                  <div className="w-full h-full flex items-center gap-2 px-1 text-black" style={{...commonStyle, color: 'black'}}>
-                       <span className={`${baseText} truncate w-16`} style={{textShadow: textShadowStyle}}>{el.props.text || "Slider"}</span>
-                       <div className="flex-1 h-0.5 bg-[#999] relative flex items-center mx-1">
-                           <div className="absolute left-[30%] w-2.5 h-3.5 bg-[#d0d0d0] border border-[#666] shadow-sm cursor-pointer hover:bg-white" />
+                  <div className="w-full h-full bg-white flex flex-col border border-neutral-400 rounded-sm" style={commonStyle}>
+                       <div className="bg-neutral-200 border-b border-neutral-300 px-2 py-1">
+                           {editableText(el, el.props.text || 'Form', 'text-black text-[10px] font-bold', { color: 'black' })}
                        </div>
-                       <div className="w-10 h-4 bg-white border border-[#aaa] text-black text-[9px] flex items-center px-1 font-mono">
-                           {el.props.value || 0}
+                       <div className="flex-1 bg-white p-1">
+                           {/* Form content goes here */}
                        </div>
                   </div>
               );
-          case ComponentType.DNumberWang:
+
+          case ComponentType.DPanel: {
+              // Default Derma skin paints DPanel light gray (#f0f0f0). Users
+              // override via the `color` prop for dark themes.
+              const paintBg = el.props.panelPaintBackground !== false;
+              const disabled = el.props.panelDisabled === true;
               return (
-                  <div className="w-full h-full bg-white border border-[#aaa] flex rounded-[2px] overflow-hidden" style={{...commonStyle, color: 'black'}}>
-                     <div className="flex-1 flex items-center px-1 text-black text-[10px]">{el.props.value || 0}</div>
-                     <div className="w-3.5 border-l border-[#aaa] flex flex-col bg-[#f0f0f0]">
-                         <div className="flex-1 flex items-center justify-center hover:bg-[#ddd] cursor-pointer text-[6px] text-black/70">▲</div>
-                         <div className="flex-1 flex items-center justify-center hover:bg-[#ddd] cursor-pointer text-[6px] text-black/70 border-t border-[#aaa]">▼</div>
-                     </div>
-                  </div>
+                  <div
+                    className="w-full h-full"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: paintBg ? (bgColor || SKIN_DEFAULTS.panel) : 'transparent',
+                      border: paintBg
+                          ? (el.props.borderWidth ? commonStyle.border : '1px solid rgba(0,0,0,0.3)')
+                          : '1px dashed rgba(255,255,255,0.15)',
+                      opacity: disabled ? 0.5 : (commonStyle.opacity ?? 1),
+                    }}
+                  />
               );
-          case ComponentType.DPanel:
-              return (
-                  <div className="w-full h-full bg-[#f0f0f0] border border-[#999]" style={{ ...commonStyle, backgroundColor: bgColor || '#f0f0f0' }} />
-              );
+          }
+
+          case ComponentType.DScrollPanel:
           case ComponentType.DTab:
-               return (
-                  <div className="w-full h-full bg-[#f0f0f0] border border-neutral-400" style={{ ...commonStyle, backgroundColor: bgColor || '#f0f0f0' }} />
+          // DTab usually renders as a panel inside the sheet content area
+              return (
+                  <div
+                    className="w-full h-full border border-black/30"
+                    style={{ ...commonStyle, backgroundColor: bgColor || SKIN_DEFAULTS.panel }}
+                  >
+                  </div>
               );
-          case ComponentType.DProgress:
-               return (
-                  <div className="w-full h-full bg-white border border-[#999] p-[1px] relative rounded-[2px]" style={commonStyle}>
-                      <div className="h-full bg-[#5a81e4] w-[60%] shadow-sm relative overflow-hidden">
-                          <div className="absolute inset-0 bg-[linear-gradient(45deg,rgba(255,255,255,0.15)_25%,transparent_25%,transparent_50%,rgba(255,255,255,0.15)_50%,rgba(255,255,255,0.15)_75%,transparent_75%,transparent)] bg-[length:10px_10px]" />
-                      </div>
-                      <div className="absolute inset-0 flex items-center justify-center text-[9px] text-black font-medium shadow-black drop-shadow-sm">60%</div>
+
+          case ComponentType.DComboBox:
+              return (
+                  <div className="w-full h-full bg-[#505050] border border-black/50 flex items-center justify-between px-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]" style={commonStyle}>
+                      {editableText(el, el.props.text || 'Select...', `${baseText} text-white`, {})}
+                      <div className="w-0 h-0 border-l-[4px] border-l-transparent border-r-[4px] border-r-transparent border-t-[5px] border-t-white/80"></div>
                   </div>
-               );
-          case ComponentType.DColorPalette:
-               return (
-                  <div className="w-full h-full bg-[#333] border border-[#666] grid grid-cols-6 grid-rows-4 gap-[1px] p-[1px]" style={commonStyle}>
-                      {Array.from({length: 24}).map((_, i) => (
-                          <div key={i} className="bg-red-500 hover:outline hover:outline-1 hover:outline-white cursor-pointer" style={{backgroundColor: `hsl(${i * 15}, 100%, 50%)`}} />
+              );
+          
+          case ComponentType.DPropertySheet:
+              return (
+                  <div className="w-full h-full bg-[#383838] flex flex-col" style={commonStyle}>
+                      {/* Fake Tab Bar */}
+                      <div className="flex px-1 pt-1 gap-1 overflow-hidden">
+                          {/* Render fake tabs based on children DTabs */}
+                          {el.children.map(childId => {
+                               const child = state.elements[childId];
+                               if (child.type === ComponentType.DTab) {
+                                   return (
+                                       <div key={childId} className="bg-[#f0f0f0] text-black text-[10px] px-2 py-0.5 rounded-t-sm border-t border-l border-r border-neutral-400 flex items-center gap-1">
+                                           {child.props.imageUrl && <div className="w-3 h-3 bg-neutral-400 rounded-full" />}
+                                           {child.props.text || "Tab"}
+                                       </div>
+                                   );
+                               }
+                               return null;
+                          })}
+                          {el.children.filter(c => state.elements[c].type === ComponentType.DTab).length === 0 && (
+                              <div className="bg-[#f0f0f0] text-black text-[10px] px-2 py-0.5 rounded-t-sm border-t border-l border-r border-neutral-400 opacity-50">Empty Sheet</div>
+                          )}
+                      </div>
+                      <div className="flex-1 bg-[#f0f0f0] border border-neutral-400 rounded-b-sm m-1 mt-0 relative p-1">
+                          {/* Children area for sheet content */}
+                      </div>
+                  </div>
+              );
+
+          case ComponentType.DListView: {
+              // Drive headers + rows from props instead of hardcoded placeholders.
+              const cols = (el.props.listColumns ?? 'Name,Value').split(',').map(s => s.trim()).filter(Boolean);
+              const rows = (el.props.listRows ?? '').split('\n').filter(l => l.trim().length > 0).map(line =>
+                  line.split(',').map(s => s.trim())
+              );
+              const showHeaders = !el.props.listHideHeaders;
+              return (
+                  <div className="w-full h-full bg-white border border-neutral-400 flex flex-col shadow-inner overflow-hidden" style={{ ...commonStyle, backgroundColor: 'white' }}>
+                      {/* Header */}
+                      {showHeaders && (
+                        <div className="h-5 bg-gradient-to-b from-[#f0f0f0] to-[#d0d0d0] border-b border-[#a0a0a0] flex shrink-0">
+                            {cols.map((c, i) => (
+                                <div key={i} className={`flex-1 ${i < cols.length - 1 ? 'border-r border-[#a0a0a0]' : ''} px-1 flex items-center`}>
+                                    <span className="text-[10px] text-black/80 font-medium truncate">{c}</span>
+                                </div>
+                            ))}
+                        </div>
+                      )}
+                      {/* Rows */}
+                      <div className="flex-1 bg-white flex flex-col overflow-y-auto">
+                          {rows.map((row, ri) => (
+                              <div key={ri} className={`flex h-4 hover:bg-[#3399FF] hover:text-white text-black ${ri % 2 === 1 ? 'bg-[#f5f5f5]' : ''}`}>
+                                  {cols.map((_, ci) => (
+                                      <div key={ci} className="flex-1 px-1 flex items-center truncate text-[10px]">{row[ci] ?? ''}</div>
+                                  ))}
+                              </div>
+                          ))}
+                      </div>
+                  </div>
+              );
+          }
+
+          case ComponentType.DBevel:
+              // Beveled panel: dark fill with chiseled inset lines (top-left shadow,
+              // bottom-right highlight). Uses inset box-shadow to fake the chisel.
+              return (
+                  <div
+                    className="w-full h-full"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: bgColor || '#2a2a2a',
+                      boxShadow: 'inset 1px 1px 0 rgba(0,0,0,0.6), inset -1px -1px 0 rgba(255,255,255,0.06)',
+                    }}
+                  />
+              );
+
+          case ComponentType.DProgress: {
+              const frac = Math.max(0, Math.min(1, el.props.progressFraction ?? 0));
+              const fillColor = el.props.color || '#3399FF';
+              return (
+                  <div
+                    className="w-full h-full overflow-hidden"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: '#1a1a1a',
+                      border: '1px solid #000',
+                      borderRadius: el.props.borderRadius ? `${el.props.borderRadius}px` : '2px',
+                      boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.6)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${frac * 100}%`,
+                        height: '100%',
+                        background: `linear-gradient(to bottom, ${fillColor}, ${fillColor}cc)`,
+                        transition: 'width 0.15s ease-out',
+                      }}
+                    />
+                  </div>
+              );
+          }
+
+          case ComponentType.DSlider: {
+              // 1D-horizontal default. If sliderLockY is set we treat as 1D-vertical.
+              // Otherwise honor both axes.
+              const sx = Math.max(0, Math.min(1, el.props.sliderLockX ?? el.props.sliderX ?? 0.5));
+              const sy = Math.max(0, Math.min(1, el.props.sliderLockY ?? el.props.sliderY ?? 0.5));
+              const knobSize = 12;
+              return (
+                  <div
+                    className="w-full h-full relative"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: '#1f1f1f',
+                      border: '1px solid #000',
+                      borderRadius: '2px',
+                      boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.6)',
+                    }}
+                  >
+                    {/* Center track line */}
+                    <div className="absolute left-1 right-1 top-1/2 h-px bg-neutral-700 -translate-y-1/2" />
+                    {/* Knob */}
+                    <div
+                      style={{
+                        position: 'absolute',
+                        width: knobSize,
+                        height: knobSize,
+                        left: `calc(${sx * 100}% - ${sx * knobSize}px)`,
+                        top: `calc(${sy * 100}% - ${sy * knobSize}px)`,
+                        background: 'linear-gradient(to bottom, #707070, #4a4a4a)',
+                        border: '1px solid #000',
+                        borderRadius: '2px',
+                        boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.15)',
+                      }}
+                    />
+                  </div>
+              );
+          }
+
+          case ComponentType.DNumSlider: {
+              const min = el.props.sliderMin ?? 0;
+              const max = el.props.sliderMax ?? 100;
+              const val = el.props.sliderValue ?? min;
+              const decimals = el.props.sliderDecimals ?? 0;
+              const range = max - min;
+              const frac = range > 0 ? Math.max(0, Math.min(1, (val - min) / range)) : 0;
+              const knobSize = 10;
+              return (
+                  <div
+                    className="w-full h-full flex items-center gap-1.5 px-1"
+                    style={{ ...commonStyle, backgroundColor: 'transparent' }}
+                  >
+                    {/* Label */}
+                    <div className="text-[11px] text-white text-right shrink-0" style={{ minWidth: 60, fontFamily: commonStyle.fontFamily, fontSize: commonStyle.fontSize }}>
+                      {editableText(el, el.props.text || 'Slider', 'text-[11px] text-white', { fontFamily: commonStyle.fontFamily, fontSize: commonStyle.fontSize, textAlign: 'right' })}
+                    </div>
+                    {/* Track */}
+                    <div className="relative flex-1 h-3 bg-[#1f1f1f] border border-black rounded-sm" style={{ boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.6)' }}>
+                      <div className="absolute left-1 right-1 top-1/2 h-px bg-neutral-700 -translate-y-1/2" />
+                      <div
+                        style={{
+                          position: 'absolute',
+                          width: knobSize,
+                          height: knobSize,
+                          left: `calc(${frac * 100}% - ${frac * knobSize}px)`,
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          background: 'linear-gradient(to bottom, #707070, #4a4a4a)',
+                          border: '1px solid #000',
+                          borderRadius: '2px',
+                        }}
+                      />
+                    </div>
+                    {/* Number entry */}
+                    <div
+                      className="bg-white border border-neutral-400 px-1 text-black text-[10px] text-center shrink-0"
+                      style={{ minWidth: 40, lineHeight: '14px', fontFamily: 'monospace' }}
+                    >
+                      {val.toFixed(decimals)}
+                    </div>
+                  </div>
+              );
+          }
+
+          case ComponentType.DImageButton: {
+              const fitClass =
+                el.props.imageKeepAspect ? 'object-contain' :
+                (el.props.imageStretchToFit !== false) ? 'object-fill' :
+                'object-none';
+              return (
+                  <div
+                    className="w-full h-full overflow-hidden relative cursor-pointer"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: bgColor || (isHovered ? '#3a3a3a' : '#2a2a2a'),
+                      border: el.props.borderWidth ? commonStyle.border : '1px solid #000',
+                      borderRadius: el.props.borderRadius ? `${el.props.borderRadius}px` : undefined,
+                    }}
+                  >
+                    {el.props.imageUrl ? (
+                      <div className="absolute inset-0" style={{ backgroundColor: el.props.imageColor || 'transparent' }}>
+                        <img
+                          src={el.props.imageUrl}
+                          alt="DImageButton"
+                          className={`w-full h-full ${fitClass} pointer-events-none`}
+                          style={{ mixBlendMode: el.props.imageColor ? 'multiply' : 'normal' }}
+                        />
+                      </div>
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center bg-neutral-800 text-neutral-600 border border-dashed border-neutral-700">
+                        <ImageOff className="w-5 h-5 mb-1 opacity-50" />
+                        <span className="text-[9px]">No Image</span>
+                      </div>
+                    )}
+                  </div>
+              );
+          }
+
+          case ComponentType.DCollapsibleCategory: {
+              const headerH = el.props.headerHeight ?? 20;
+              const expanded = el.props.expanded !== false;
+              return (
+                  <div
+                    className="w-full h-full overflow-hidden"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: bgColor || '#2a2a2a',
+                      border: el.props.borderWidth ? commonStyle.border : '1px solid rgba(0,0,0,0.4)',
+                    }}
+                  >
+                    {/* Header bar */}
+                    <div
+                      style={{
+                        height: headerH,
+                        background: 'linear-gradient(to bottom, #4a4a4a, #383838)',
+                        borderBottom: '1px solid rgba(0,0,0,0.5)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        paddingLeft: 6,
+                        paddingRight: 6,
+                      }}
+                    >
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        {editableText(el, el.props.text || 'Category', 'text-[11px] text-white font-bold', { fontFamily: commonStyle.fontFamily, fontSize: commonStyle.fontSize })}
+                      </div>
+                      <span className="text-[10px] text-white/70 select-none ml-1">{expanded ? '▼' : '▶'}</span>
+                    </div>
+                    {/* Content area marker (real children render in absolute children container) */}
+                    {!expanded && (
+                      <div className="w-full" style={{ height: `calc(100% - ${headerH}px)`, background: 'repeating-linear-gradient(45deg, transparent, transparent 8px, rgba(255,255,255,0.02) 8px, rgba(255,255,255,0.02) 16px)' }} />
+                    )}
+                  </div>
+              );
+          }
+
+          case ComponentType.DRichText: {
+              const showScroll = el.props.richScrollbar !== false;
+              const lines = (el.props.text ?? '').split('\n');
+              return (
+                  <div
+                    className="w-full h-full bg-white border border-neutral-400 shadow-inner"
+                    style={{ ...commonStyle, backgroundColor: 'white', borderRadius: commonStyle.borderRadius }}
+                  >
+                    <div
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        padding: 4,
+                        overflowY: showScroll ? 'auto' : 'hidden',
+                        overflowX: 'hidden',
+                        whiteSpace: 'pre-wrap',
+                        color: 'black',
+                        fontFamily: commonStyle.fontFamily || 'Arial, sans-serif',
+                        fontSize: commonStyle.fontSize || '11px',
+                        lineHeight: 1.3,
+                      }}
+                    >
+                      {lines.map((line, i) => <div key={i}>{line || ' '}</div>)}
+                    </div>
+                  </div>
+              );
+          }
+
+          case ComponentType.DBinder:
+              // Looks like a DButton showing the bound key name.
+              return (
+                  <div
+                    className="w-full h-full border border-black/50 flex items-center justify-center"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: bgColor || (isHovered ? '#606060' : '#505050'),
+                      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.1)',
+                    }}
+                  >
+                    <span className="text-[11px] text-white font-mono select-none" style={{ fontFamily: commonStyle.fontFamily, fontSize: commonStyle.fontSize }}>
+                      {el.props.binderKey || 'NONE'}
+                    </span>
+                  </div>
+              );
+
+          case ComponentType.DNumberWang: {
+              const min = el.props.sliderMin ?? 0;
+              const max = el.props.sliderMax ?? 100;
+              const val = Math.max(min, Math.min(max, el.props.sliderValue ?? 0));
+              const decimals = el.props.sliderDecimals ?? 0;
+              return (
+                  <div
+                    className="w-full h-full bg-white border border-neutral-400 flex items-stretch shadow-inner"
+                    style={{ ...commonStyle, backgroundColor: 'white', borderRadius: commonStyle.borderRadius }}
+                  >
+                    <div className="flex-1 flex items-center px-1.5" style={{ minWidth: 0 }}>
+                      <span className="text-[11px] text-black font-mono w-full" style={{ textAlign: 'left' }}>
+                        {val.toFixed(decimals)}
+                      </span>
+                    </div>
+                    {/* Up/Down stack */}
+                    <div className="flex flex-col border-l border-neutral-400" style={{ width: 14 }}>
+                      <div className="flex-1 flex items-center justify-center bg-neutral-200 border-b border-neutral-400 text-black text-[8px] leading-none select-none">▲</div>
+                      <div className="flex-1 flex items-center justify-center bg-neutral-200 text-black text-[8px] leading-none select-none">▼</div>
+                    </div>
+                  </div>
+              );
+          }
+
+          case ComponentType.DVerticalDivider: {
+              const topH = el.props.dividerTopHeight ?? 100;
+              const dh = el.props.dividerHeight ?? 4;
+              return (
+                  <div
+                    className="w-full h-full overflow-hidden relative"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: bgColor || '#252525',
+                      border: el.props.borderWidth ? commonStyle.border : '1px solid rgba(0,0,0,0.5)',
+                    }}
+                  >
+                    {/* Top zone */}
+                    <div className="absolute left-0 right-0 top-0" style={{ height: topH, background: 'rgba(255,255,255,0.025)' }}>
+                      <span className="absolute top-1 left-1 text-[8px] text-neutral-600 font-mono uppercase tracking-wider">Top</span>
+                    </div>
+                    {/* Divider bar */}
+                    <div
+                      className="absolute left-0 right-0 cursor-ns-resize"
+                      style={{
+                        top: topH,
+                        height: dh,
+                        background: 'linear-gradient(to bottom, #5a5a5a, #3a3a3a)',
+                        borderTop: '1px solid rgba(0,0,0,0.6)',
+                        borderBottom: '1px solid rgba(0,0,0,0.6)',
+                      }}
+                    />
+                    {/* Bottom zone */}
+                    <div className="absolute left-0 right-0 bottom-0" style={{ top: topH + dh, background: 'rgba(255,255,255,0.025)' }}>
+                      <span className="absolute top-1 left-1 text-[8px] text-neutral-600 font-mono uppercase tracking-wider">Bottom</span>
+                    </div>
+                  </div>
+              );
+          }
+
+          case ComponentType.DColorMixer: {
+              const showAlpha = el.props.mixerShowAlphaBar !== false;
+              const showPalette = el.props.mixerShowPalette !== false;
+              const showWangs = el.props.mixerShowWangs !== false;
+              const c = el.props.mixerColor || '#ff8000';
+              const a = el.props.mixerAlpha ?? 255;
+              const r = parseInt(c.slice(1, 3), 16);
+              const g = parseInt(c.slice(3, 5), 16);
+              const b = parseInt(c.slice(5, 7), 16);
+              return (
+                  <div
+                    className="w-full h-full overflow-hidden flex flex-col"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: bgColor || '#2a2a2a',
+                      border: el.props.borderWidth ? commonStyle.border : '1px solid rgba(0,0,0,0.5)',
+                      padding: 4,
+                      gap: 4,
+                    }}
+                  >
+                    {/* Top row: cube + alpha + wangs */}
+                    <div className="flex gap-1" style={{ flex: showPalette ? '1 1 60%' : '1 1 100%', minHeight: 0 }}>
+                      {/* Color cube area (sat × value gradient) */}
+                      <div
+                        className="relative"
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          background: `linear-gradient(to top, black, transparent), linear-gradient(to right, white, ${c})`,
+                          border: '1px solid rgba(0,0,0,0.6)',
+                        }}
+                      >
+                        {/* Crosshair indicator */}
+                        <div className="absolute" style={{ left: '50%', top: '50%', width: 6, height: 6, transform: 'translate(-50%, -50%)', border: '1px solid white', borderRadius: '50%', boxShadow: '0 0 0 1px black' }} />
+                      </div>
+                      {showAlpha && (
+                        <div
+                          style={{
+                            width: 10,
+                            background: `linear-gradient(to bottom, ${c}, transparent), repeating-conic-gradient(#ccc 0 25%, white 0 50%) 50% / 6px 6px`,
+                            border: '1px solid rgba(0,0,0,0.6)',
+                          }}
+                        />
+                      )}
+                      {showWangs && (
+                        <div className="flex flex-col gap-0.5" style={{ width: 30 }}>
+                          {[r, g, b, a].map((v, i) => (
+                            <div key={i} className="bg-white border border-neutral-400 flex-1 flex items-center justify-center text-[8px] text-black font-mono" style={{ minHeight: 0 }}>
+                              {v}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    {/* Bottom row: palette swatches */}
+                    {showPalette && (
+                      <div className="flex flex-wrap gap-0.5" style={{ flex: '0 0 auto', maxHeight: 36 }}>
+                        {['#ffffff','#ff0000','#ffa500','#ffff00','#00ff00','#00ffff','#0080ff','#0000ff','#800080','#ff00ff','#ffc0cb','#a52a2a','#808080','#000000'].map((sw, i) => (
+                          <div key={i} style={{ width: 12, height: 12, background: sw, border: '1px solid rgba(0,0,0,0.4)' }} />
+                        ))}
+                      </div>
+                    )}
+                    {/* Optional label */}
+                    {el.props.mixerLabel && (
+                      <div className="text-[9px] text-neutral-300 text-center" style={{ flex: '0 0 auto' }}>{el.props.mixerLabel}</div>
+                    )}
+                  </div>
+              );
+          }
+
+          case ComponentType.DColorCube: {
+              const base = el.props.cubeBaseColor || '#ff0000';
+              const sx = Math.max(0, Math.min(1, el.props.sliderX ?? 0.5));
+              const sy = Math.max(0, Math.min(1, el.props.sliderY ?? 0.5));
+              return (
+                  <div
+                    className="w-full h-full relative"
+                    style={{
+                      ...commonStyle,
+                      background: `linear-gradient(to top, black, transparent), linear-gradient(to right, white, ${base})`,
+                      border: el.props.borderWidth ? commonStyle.border : '1px solid rgba(0,0,0,0.6)',
+                    }}
+                  >
+                    {/* Crosshair */}
+                    <div
+                      style={{
+                        position: 'absolute',
+                        left: `${sx * 100}%`,
+                        top: `${(1 - sy) * 100}%`,
+                        width: 8, height: 8,
+                        transform: 'translate(-50%, -50%)',
+                        border: '1px solid white',
+                        borderRadius: '50%',
+                        boxShadow: '0 0 0 1px black',
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  </div>
+              );
+          }
+
+          case ComponentType.DColorPalette: {
+              const swatchHex = (el.props.paletteColors || '').split(',').map(s => s.trim()).filter(Boolean);
+              const size = el.props.paletteButtonSize ?? 16;
+              return (
+                  <div
+                    className="w-full h-full overflow-hidden p-0.5"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: bgColor || '#1a1a1a',
+                      border: el.props.borderWidth ? commonStyle.border : '1px solid rgba(0,0,0,0.4)',
+                    }}
+                  >
+                    <div className="flex flex-wrap" style={{ gap: 2 }}>
+                      {swatchHex.map((hex, i) => (
+                        <div
+                          key={i}
+                          style={{
+                            width: size,
+                            height: size,
+                            background: hex,
+                            border: '1px solid rgba(0,0,0,0.5)',
+                          }}
+                          title={hex}
+                        />
                       ))}
+                    </div>
                   </div>
-               );
-          case ComponentType.DColorCube:
-               return (
-                  <div className="w-full h-full border border-[#666] relative" style={{...commonStyle, background: 'linear-gradient(to bottom, transparent, black), linear-gradient(to right, white, red)'}}>
-                      <div className="absolute right-2 top-2 w-2 h-2 rounded-full border border-white ring-1 ring-black cursor-pointer" />
+              );
+          }
+
+          case ComponentType.DSysButton: {
+              const t = el.props.sysButtonType || 'close';
+              const glyph = t === 'close' ? '✕' : t === 'minim' ? '–' : t === 'maxim' ? '□' : '↗';
+              const hoverColor = t === 'close' ? '#dc2626' : '#606060';
+              return (
+                  <div
+                    className="w-full h-full flex items-center justify-center select-none"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: bgColor || (isHovered ? hoverColor : '#3a3a3a'),
+                      border: el.props.borderWidth ? commonStyle.border : '1px solid rgba(0,0,0,0.5)',
+                      color: 'white',
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                      lineHeight: 1,
+                    }}
+                  >
+                    {glyph}
                   </div>
-               );
-          case ComponentType.DColorMixer:
-               return (
-                  <div className="w-full h-full bg-[#f0f0f0] border border-[#999] flex gap-1 p-1" style={{...commonStyle, color: 'black'}}>
-                       <div className="flex-1 h-full border border-[#666] relative" style={{background: 'linear-gradient(to bottom, transparent, black), linear-gradient(to right, white, red)'}}>
-                            <div className="absolute right-2 top-2 w-2 h-2 rounded-full border border-white ring-1 ring-black" />
-                       </div>
-                       <div className="w-4 h-full border border-[#666]" style={{background: 'linear-gradient(to bottom, red, yellow, lime, cyan, blue, magenta, red)'}}></div>
-                       <div className="w-12 flex flex-col gap-1 justify-center">
-                           <div className="h-3 bg-white border border-[#aaa] text-[8px] flex items-center justify-center">255</div>
-                           <div className="h-3 bg-white border border-[#aaa] text-[8px] flex items-center justify-center">0</div>
-                           <div className="h-3 bg-white border border-[#aaa] text-[8px] flex items-center justify-center">0</div>
-                           <div className="h-3 bg-white border border-[#aaa] text-[8px] flex items-center justify-center">255</div>
-                       </div>
+              );
+          }
+
+          case ComponentType.DHTML: {
+              const url = el.props.htmlUrl || '';
+              const hasContent = !!el.props.htmlContent;
+              return (
+                  <div
+                    className="w-full h-full overflow-hidden flex flex-col"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: '#1a1a1a',
+                      border: el.props.borderWidth ? commonStyle.border : '1px solid rgba(0,0,0,0.5)',
+                    }}
+                  >
+                    {/* URL bar */}
+                    <div
+                      className="flex items-center px-1.5 gap-1.5 text-[9px] text-neutral-300 font-mono shrink-0"
+                      style={{ height: 18, background: '#2a2a2a', borderBottom: '1px solid rgba(0,0,0,0.6)' }}
+                    >
+                      <Globe className="w-2.5 h-2.5 opacity-60 shrink-0" />
+                      <span className="truncate" title={url || '(inline content)'}>
+                        {url || (hasContent ? '(inline content)' : 'about:blank')}
+                      </span>
+                    </div>
+                    {/* Body */}
+                    <div className="flex-1 overflow-hidden bg-white text-black text-[10px] font-mono p-1.5" style={{ overflowY: el.props.htmlScrollbars !== false ? 'auto' : 'hidden' }}>
+                      {hasContent ? (
+                        <pre className="whitespace-pre-wrap break-all">{el.props.htmlContent}</pre>
+                      ) : (
+                        <div className="w-full h-full flex flex-col items-center justify-center text-neutral-500">
+                          <Globe className="w-6 h-6 opacity-40 mb-1" />
+                          <span className="text-[9px]">DHTML preview</span>
+                        </div>
+                      )}
+                    </div>
                   </div>
-               );
-          case ComponentType.DMenu:
-               return (
-                  <div className="w-full h-full bg-white border border-[#ccc] shadow-lg flex flex-col py-1" style={commonStyle}>
-                      <div className="px-3 py-1 text-[10px] text-black hover:bg-[#3399ff] hover:text-white cursor-pointer flex justify-between items-center">
-                          <span>Option One</span>
+              );
+          }
+
+          case ComponentType.DTree: {
+              // Parse indented text into nested rows. Two-space indent = one level.
+              const text = el.props.treeNodes ?? '';
+              const showIcons = el.props.treeShowIcons !== false;
+              const indent = el.props.treeIndentSize ?? 16;
+              const lineH = el.props.treeLineHeight ?? 17;
+              const rows = text.split('\n').filter(l => l.trim().length > 0).map((line, i) => {
+                  const leading = line.length - line.trimStart().length;
+                  const level = Math.floor(leading / 2);
+                  const trimmed = line.trim();
+                  const [label, icon] = trimmed.split('|').map(s => s.trim());
+                  return { i, level, label, icon };
+              });
+              return (
+                  <div
+                    className="w-full h-full overflow-auto"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: 'white',
+                      border: el.props.borderWidth ? commonStyle.border : '1px solid #999',
+                    }}
+                  >
+                    {rows.map(r => (
+                      <div
+                        key={r.i}
+                        className="flex items-center hover:bg-blue-100"
+                        style={{
+                          height: lineH,
+                          paddingLeft: 4 + r.level * indent,
+                          fontSize: 11,
+                          color: 'black',
+                        }}
+                      >
+                        <span className="text-neutral-500 mr-1 select-none" style={{ fontSize: 9 }}>▸</span>
+                        {showIcons && (
+                          <span className="inline-block bg-yellow-200 border border-yellow-600 mr-1 shrink-0" style={{ width: 12, height: 12 }} title={r.icon || 'icon16/page.png'} />
+                        )}
+                        <span className="truncate">{r.label}</span>
                       </div>
-                      <div className="px-3 py-1 text-[10px] text-black hover:bg-[#3399ff] hover:text-white cursor-pointer flex justify-between items-center">
-                          <span>Option Two</span>
-                          <span className="text-[8px] opacity-70">Ctrl+A</span>
-                      </div>
-                      <div className="h-px bg-[#eee] my-1 mx-1" />
-                      <div className="px-3 py-1 text-[10px] text-black hover:bg-[#3399ff] hover:text-white cursor-pointer flex justify-between items-center">
-                          <span>Exit</span>
-                      </div>
+                    ))}
                   </div>
-               );
-          case ComponentType.DVerticalDivider:
-               return (
-                   <div className="w-full h-full bg-[#f0f0f0] border-l border-[#fff] border-r border-[#999] flex items-center justify-center cursor-col-resize" style={commonStyle}>
-                       <div className="h-4 w-[1px] bg-[#999] mx-[1px]" />
-                       <div className="h-4 w-[1px] bg-[#fff] mx-[1px]" />
-                   </div>
-               );
-          case ComponentType.DHorizontalDivider:
-               return (
-                   <div className="w-full h-full bg-[#f0f0f0] border-t border-[#fff] border-b border-[#999] flex flex-col items-center justify-center cursor-row-resize" style={commonStyle}>
-                       <div className="w-4 h-[1px] bg-[#999] my-[1px]" />
-                       <div className="w-4 h-[1px] bg-[#fff] my-[1px]" />
-                   </div>
-               );
+              );
+          }
+
+          case ComponentType.DMenu: {
+              const text = el.props.menuItems ?? '';
+              const showIconCol = el.props.menuShowIconColumn !== false;
+              const items = text.split('\n').map((line, i) => {
+                  const trimmed = line.trim();
+                  if (trimmed === '---') return { i, spacer: true } as const;
+                  const [label, icon] = trimmed.split('|').map(s => s.trim());
+                  return { i, spacer: false, label, icon } as const;
+              });
+              return (
+                  <div
+                    className="w-full h-full overflow-hidden flex flex-col"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: '#3a3a3a',
+                      border: el.props.borderWidth ? commonStyle.border : '1px solid #000',
+                      padding: 1,
+                    }}
+                  >
+                    {items.map(it => it.spacer ? (
+                        <div key={it.i} className="bg-neutral-600 my-1" style={{ height: 1 }} />
+                    ) : (
+                        <div
+                          key={it.i}
+                          className="flex items-center hover:bg-blue-600/70 px-1 cursor-default select-none"
+                          style={{ height: 18, fontSize: 11, color: 'white' }}
+                        >
+                          {showIconCol && (
+                            <span className="inline-block bg-yellow-200 border border-yellow-600 mr-1.5 shrink-0" style={{ width: 12, height: 12 }} title={it.icon || ''} />
+                          )}
+                          <span className="truncate">{it.label}</span>
+                        </div>
+                    ))}
+                  </div>
+              );
+          }
+
+          case ComponentType.DMenuBar: {
+              const text = el.props.menuBarItems ?? '';
+              const menus = text.split('\n').filter(l => l.trim().length > 0).map((line, i) => {
+                  const colon = line.indexOf(':');
+                  const label = colon === -1 ? line.trim() : line.slice(0, colon).trim();
+                  return { i, label };
+              });
+              return (
+                  <div
+                    className="w-full h-full flex items-stretch overflow-hidden"
+                    style={{
+                      ...commonStyle,
+                      background: bgColor || 'linear-gradient(to bottom, #f0f0f0, #d0d0d0)',
+                      border: el.props.borderWidth ? commonStyle.border : '1px solid #888',
+                    }}
+                  >
+                    {menus.map(m => (
+                      <div
+                        key={m.i}
+                        className="px-2 flex items-center text-[11px] hover:bg-blue-200 cursor-default select-none"
+                        style={{ color: 'black' }}
+                      >
+                        {m.label}
+                      </div>
+                    ))}
+                  </div>
+              );
+          }
+
+          case ComponentType.DGrid:
+              // Container: children are rendered by the children container (overridden in renderElement)
+              return (
+                  <div
+                    className="w-full h-full"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: bgColor || 'transparent',
+                      border: el.props.borderWidth ? commonStyle.border : '1px dashed rgba(255,255,255,0.1)',
+                    }}
+                  />
+              );
+
+          case ComponentType.DIconLayout:
+              // Container with auto-flow children
+              return (
+                  <div
+                    className="w-full h-full"
+                    style={{
+                      ...commonStyle,
+                      backgroundColor: bgColor || 'transparent',
+                      border: el.props.borderWidth ? commonStyle.border : '1px dashed rgba(255,255,255,0.1)',
+                    }}
+                  />
+              );
+
+          case ComponentType.DColumnSheet:
+              return (
+                  <div className="w-full h-full bg-[#383838] flex flex-row" style={commonStyle}>
+                      {/* Vertical tab strip on the LEFT */}
+                      <div className="flex flex-col gap-1 p-1 shrink-0" style={{ width: 80, background: '#2a2a2a', borderRight: '1px solid rgba(0,0,0,0.5)' }}>
+                          {el.children.map(childId => {
+                              const child = state.elements[childId];
+                              if (child?.type === ComponentType.DTab) {
+                                  return (
+                                      <div key={childId} className="flex flex-col items-center justify-center bg-[#4a4a4a] hover:bg-[#5a5a5a] border border-black/40 text-[10px] text-white py-1 px-1 cursor-default select-none">
+                                          {child.props.imageUrl && <div className="w-3 h-3 bg-yellow-200 border border-yellow-600 mb-0.5" />}
+                                          <span className="truncate w-full text-center">{child.props.text || 'Tab'}</span>
+                                      </div>
+                                  );
+                              }
+                              return null;
+                          })}
+                          {el.children.filter(c => state.elements[c]?.type === ComponentType.DTab).length === 0 && (
+                              <div className="text-[9px] text-neutral-500 text-center opacity-60">Add DTab children</div>
+                          )}
+                      </div>
+                      {/* Content area on the RIGHT — children render here via the children container */}
+                      <div className="flex-1 bg-[#f0f0f0] border border-neutral-400 m-1" />
+                  </div>
+              );
+
           default:
               return (
-                  <div className="w-full h-full bg-[#3a3a3a] border border-neutral-500 flex flex-col items-center justify-center shadow-md relative group" style={commonStyle}>
-                      <div className="absolute inset-0 bg-neutral-900/10" />
-                      <span className="text-[10px] text-neutral-400 font-mono font-bold z-10">{el.type}</span>
+                  <div className="w-full h-full bg-[#2a2a2a] border border-dashed border-neutral-600 flex items-center justify-center" style={{opacity: commonStyle.opacity}}>
+                      <span className="text-[10px] text-neutral-500 font-mono">{el.type}</span>
                   </div>
               );
       }
@@ -451,193 +1384,999 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onUpdateEle
     if (!el) return null;
 
     const isSelected = state.selectedId === id;
+    // An element is in the multi-selection if it's part of selectedIds. The PRIMARY
+    // (selectedId) gets the strong blue outline; secondary multi-selected elements
+    // get a lighter dashed outline so the primary remains visually distinguishable.
+    const isMultiSelected = state.selectedIds.includes(id) && !isSelected;
     const isHovered = hoveredId === id;
     const parent = el.parentId ? state.elements[el.parentId] : null;
-    const isAutoLayout = parent && ((parent.props.layoutMode && parent.props.layoutMode !== 'none') || parent.type === ComponentType.DIconLayout || parent.type === ComponentType.DCollapsibleCategory);
-    const autoBehavior = el.props.autoLayoutBehavior || 'fixed';
-    const isTabInSheet = el.type === ComponentType.DTab && parent?.type === ComponentType.DPropertySheet;
-    const isListInColumnSheet = parent?.type === ComponentType.DColumnSheet;
+    const isAutoLayout = parent?.props.layoutMode && parent.props.layoutMode !== 'none';
+    
+    // Check if element is a Tab inside a sheet container (DPropertySheet horizontal, DColumnSheet vertical).
+    const isTabInSheet = el.type === ComponentType.DTab && (parent?.type === ComponentType.DPropertySheet || parent?.type === ComponentType.DColumnSheet);
 
+    // Apply Scale Transform if Hovered
     const scale = (isHovered && el.props.hoverScale) ? el.props.hoverScale : 1;
     
-    // Visibility and Enabled State
-    const isVisible = el.props.visible !== false;
-    const isEnabled = el.props.enabled !== false;
+    // Simulate Dock behavior:
+    const layoutWidth = (isAutoLayout && parent?.props.layoutMode === 'vertical') ? '100%' : el.props.w;
+    const layoutHeight = (isAutoLayout && parent?.props.layoutMode === 'horizontal') ? '100%' : el.props.h;
 
-    let layoutWidth: string | number = el.props.w;
-    let layoutHeight: string | number = el.props.h;
-    let flexGrow = 0;
-    let flexShrink = 0;
+    // DForm header fix: Auto-layout usually, but we want it to look like a form
+    // If it's DForm, children stack vertically by default in GMod (DForm inherits DCollapsibleCategory/Panel which layouts children)
+    // We can force auto-layout visual for DForm children if we want, but user controls it via props.
     
-    if (isAutoLayout) {
-        if (parent?.type === ComponentType.DIconLayout) {
-             layoutWidth = el.props.w;
-             layoutHeight = el.props.h;
-        } else if (parent?.type === ComponentType.DCollapsibleCategory) {
-             layoutWidth = '100%';
-             layoutHeight = el.props.h;
-        } else if (parent?.props.layoutMode === 'vertical') {
-            layoutWidth = '100%'; 
-            if (autoBehavior === 'fill') { flexGrow = 1; layoutHeight = 'auto'; }
-            else if (autoBehavior === 'shrink') { layoutHeight = 'auto'; flexShrink = 1; }
-        } else if (parent?.props.layoutMode === 'horizontal') {
-            layoutHeight = '100%'; 
-            if (autoBehavior === 'fill') { flexGrow = 1; layoutWidth = 'auto'; }
-            else if (autoBehavior === 'shrink') { layoutWidth = 'auto'; flexShrink = 1; }
-        }
-    }
-
-    if (isTabInSheet) {
-        layoutWidth = '100%';
-        layoutHeight = '100%';
-    }
-
-    const finalStyle: React.CSSProperties = {
-      position: (isAutoLayout || isTabInSheet || isListInColumnSheet) ? 'relative' : 'absolute',
-      left: (isAutoLayout || isTabInSheet || isListInColumnSheet) ? undefined : el.props.x,
-      top: (isAutoLayout || isTabInSheet || isListInColumnSheet) ? undefined : el.props.y,
-      width: layoutWidth,
-      height: layoutHeight,
+    let finalStyle: React.CSSProperties = {
+      position: (isAutoLayout || isTabInSheet) ? 'relative' : 'absolute',
+      left: (isAutoLayout || isTabInSheet) ? undefined : el.props.x,
+      top: (isAutoLayout || isTabInSheet) ? undefined : el.props.y,
+      width: isTabInSheet ? '100%' : layoutWidth,
+      height: isTabInSheet ? '100%' : layoutHeight,
       zIndex: isSelected ? 10 : 1,
       transform: scale !== 1 ? `scale(${scale})` : undefined,
-      transition: 'transform 0.1s ease-out, opacity 0.15s ease-out',
-      flexGrow: flexGrow,
-      flexShrink: flexShrink,
-      minWidth: (isAutoLayout && autoBehavior === 'fixed') ? el.props.w : undefined,
-      minHeight: (isAutoLayout && autoBehavior === 'fixed') ? el.props.h : undefined,
-      // Handle visibility and enabled state visuals
-      opacity: isVisible ? (isEnabled ? 1 : 0.6) : 0.2, // Ghosted if hidden, dimmed if disabled
-      filter: isEnabled ? 'none' : 'grayscale(0.5)',
+      transition: 'transform 0.1s ease-out',
+      transformOrigin: 'center center',
+      flexShrink: 0 
     };
     
+    // DPropertySheet Children Handling
+    // If element is DPropertySheet, its children (DTabs) should be rendered inside the content area.
+    // We override children container style for PropertySheet.
+    if (el.type === ComponentType.DPropertySheet) {
+        // We need to target the content area div which is the second child of the main render
+        // But here we wrap children. 
+        // We will just let them render in the flow of the container div we created in renderVGUIContent?
+        // No, renderVGUIContent returns a specific structure.
+        // We need to Portal them? Or just use CSS grid/absolute?
+        // Simplest: renderVGUIContent renders the *frame*, this children loop renders the contents.
+        // We use absolute positioning for children inside the padding area.
+    }
+    
+    const lockedEffectively = isEffectivelyLocked(id);
+
     const handleMouseDown = (e: React.MouseEvent) => {
       e.stopPropagation();
+      // Ctrl/Cmd+Click toggles multi-selection without starting a drag.
+      // Note: e.altKey is reserved for canvas pan (see startPan), so we don't
+      // intercept it here.
+      if (e.ctrlKey || e.metaKey) {
+        if (e.button === 0) onToggleSelection?.(id);
+        return;
+      }
       onSelect(id);
-      if (isAutoLayout || isTabInSheet || isListInColumnSheet) return; 
-      
-      const startX = e.clientX, startY = e.clientY, startLeft = el.props.x, startTop = el.props.y;
 
+      if (isAutoLayout || isTabInSheet) return;
+      // Locked (or has a locked ancestor) — selection still works, but drag is blocked.
+      if (lockedEffectively) return;
+
+      // If DFrame, check if we clicked the title bar for dragging
       if (el.type === ComponentType.DFrame) {
-         if (el.props.draggable === false) return; 
+         // Get the click position relative to the element
          const rect = e.currentTarget.getBoundingClientRect();
-         // Ensure click is on title bar for DFrame dragging
-         if (e.clientY - rect.top > 24) return;
+         const relativeY = e.clientY - rect.top;
+
+         // Standard DFrame title bar height is around 24px
+         if (relativeY > 24) {
+             return; // Don't drag if not on title bar
+         }
       }
 
-      const handleMouseMove = (mv: MouseEvent) => {
-        onUpdateElement(id, { x: snap(startLeft + (mv.clientX - startX) / viewState.zoom), y: snap(startTop + (mv.clientY - startY) / viewState.zoom) });
+      const startX = e.clientX;
+      const startY = e.clientY;
+
+      // Multi-drag: if the dragged element is part of a multi-selection, snapshot
+      // the start position of EVERY selected element (skipping locked ones, since
+      // those refuse moves anyway). Then on each move tick, apply the same delta
+      // to every snapshotted element.
+      const isMultiDrag = state.selectedIds.length > 1 && state.selectedIds.includes(id);
+      const startPositions = new Map<string, { x: number; y: number }>();
+      if (isMultiDrag) {
+        for (const sid of state.selectedIds) {
+          const sel = state.elements[sid];
+          if (!sel) continue;
+          if (isEffectivelyLocked(sid)) continue;
+          // Skip elements whose parent uses auto-layout (their position is parent-controlled)
+          const sp = sel.parentId ? state.elements[sel.parentId] : null;
+          if (sp?.props.layoutMode && sp.props.layoutMode !== 'none') continue;
+          startPositions.set(sid, { x: sel.props.x, y: sel.props.y });
+        }
+      } else {
+        startPositions.set(id, { x: el.props.x, y: el.props.y });
+      }
+
+      const handleMouseMove = (moveEvent: MouseEvent) => {
+        const dx = (moveEvent.clientX - startX) / viewState.zoom;
+        const dy = (moveEvent.clientY - startY) / viewState.zoom;
+
+        // Atomic batch: build all patches, apply in ONE state write so each
+        // element's update doesn't get overwritten by stale-state from the next.
+        if (startPositions.size > 1 && onPatchMany) {
+          const patches: Array<{ id: string; props: Partial<UIElement['props']> }> = [];
+          for (const [sid, start] of startPositions) {
+            patches.push({ id: sid, props: { x: snap(start.x + dx), y: snap(start.y + dy) } });
+          }
+          onPatchMany(patches);
+        } else {
+          // Single-element drag — original codepath
+          const start = startPositions.get(id);
+          if (start) onUpdateElement(id, { x: snap(start.x + dx), y: snap(start.y + dy) });
+        }
       };
-      const handleMouseUp = () => { document.removeEventListener('mousemove', handleMouseMove); document.removeEventListener('mouseup', handleMouseUp); };
+
+      const handleMouseUp = () => {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+      };
+
       document.addEventListener('mousemove', handleMouseMove);
       document.addEventListener('mouseup', handleMouseUp);
     };
 
-    const containerStyle: React.CSSProperties = {
-        position: 'relative', width: '100%', height: '100%', pointerEvents: 'auto',
-        display: (el.props.layoutMode && el.props.layoutMode !== 'none') || el.type === ComponentType.DIconLayout ? 'flex' : 'block',
-        flexDirection: el.props.layoutMode === 'horizontal' ? 'row' : (el.type === ComponentType.DIconLayout ? 'row' : 'column'),
-        flexWrap: el.type === ComponentType.DIconLayout ? 'wrap' : 'nowrap',
-        gap: el.type === ComponentType.DIconLayout ? `${el.props.spaceY || 0}px ${el.props.spaceX || 0}px` : (el.props.layoutSpacing ? `${el.props.layoutSpacing}px` : undefined),
+    // Calculate layout style for children container
+    const childrenContainerStyle: React.CSSProperties = {
+        position: 'relative',
+        width: '100%',
+        height: '100%',
+        pointerEvents: 'auto',
+        // Auto Layout Flexbox Logic
+        display: el.props.layoutMode && el.props.layoutMode !== 'none' ? 'flex' : 'block',
+        flexDirection: el.props.layoutMode === 'horizontal' ? 'row' : 'column',
+        gap: el.props.layoutSpacing ? `${el.props.layoutSpacing}px` : undefined,
         padding: el.props.layoutPadding ? `${el.props.layoutPadding}px` : undefined,
+        overflowY: el.type === ComponentType.DScrollPanel ? 'auto' : 'hidden',
+        overflowX: 'hidden'
     };
     
-    // Special handling for content rendering of complex components
-    // We only render children inside the container area
-    let childrenContainerClass = `absolute inset-0 pointer-events-none ${el.type === ComponentType.DFrame ? 'top-6' : ''}`;
-    
+    // DPropertySheet Children Handling
     if (el.type === ComponentType.DPropertySheet) {
-        childrenContainerClass = "absolute top-[20px] left-[1px] right-[1px] bottom-[1px] pointer-events-none"; 
-        containerStyle.padding = '4px';
-    } else if (el.type === ComponentType.DColumnSheet) {
-        // For column sheet, children are typically rendered in the right panel or left list. 
-        // For simplicity in this editor, we put them in the right panel area
-        childrenContainerClass = "absolute top-0 right-0 bottom-0 left-[25%] pointer-events-none p-2";
+        childrenContainerStyle.position = 'absolute';
+        childrenContainerStyle.top = '24px'; // Below tab bar
+        childrenContainerStyle.left = '4px';
+        childrenContainerStyle.right = '4px';
+        childrenContainerStyle.bottom = '4px';
+        childrenContainerStyle.width = 'auto';
+        childrenContainerStyle.height = 'auto';
+        childrenContainerStyle.overflow = 'hidden';
     }
 
-    const renderLayoutIndicators = () => {
-        if (!isSelected) return null;
-        if (el.props.layoutMode === 'vertical' || el.props.layoutMode === 'horizontal') {
-            const padding = el.props.layoutPadding || 0;
-            const spacing = el.props.layoutSpacing || 0;
-            return (
-                <div className="absolute inset-0 pointer-events-none border-2 border-blue-400/30 border-dashed z-50 rounded-sm overflow-hidden">
-                    <div 
-                        className="absolute inset-0 border border-blue-400/20 bg-blue-500/5"
-                        style={{ margin: padding }}
-                    />
-                    <div className="absolute top-1 right-1 bg-blue-500 text-white text-[9px] px-1.5 py-0.5 rounded shadow-sm flex items-center gap-1 font-mono">
-                        {el.props.layoutMode === 'vertical' ? <ArrowDown className="w-3 h-3" /> : <ArrowRight className="w-3 h-3" />}
-                        <span className="font-bold">{el.props.layoutMode === 'vertical' ? 'V-Stack' : 'H-Stack'}</span>
-                        <span className="opacity-80 ml-1 text-[8px] border-l border-white/30 pl-1">P:{padding} S:{spacing}</span>
-                    </div>
-                </div>
-            )
-        }
-        return null;
+    // DColumnSheet Children Handling — content area is to the RIGHT of the 80px tab strip.
+    if (el.type === ComponentType.DColumnSheet) {
+        childrenContainerStyle.position = 'absolute';
+        childrenContainerStyle.left = '84px';   // 80 strip + 4 margin
+        childrenContainerStyle.top = '4px';
+        childrenContainerStyle.right = '4px';
+        childrenContainerStyle.bottom = '4px';
+        childrenContainerStyle.width = 'auto';
+        childrenContainerStyle.height = 'auto';
+        childrenContainerStyle.overflow = 'hidden';
     }
+    
+    // DForm Children Handling
+    if (el.type === ComponentType.DForm) {
+        childrenContainerStyle.position = 'absolute';
+        childrenContainerStyle.top = '24px'; // Below label
+        childrenContainerStyle.left = '4px';
+        childrenContainerStyle.right = '4px';
+        childrenContainerStyle.bottom = '4px';
+        childrenContainerStyle.width = 'auto';
+        childrenContainerStyle.height = 'auto';
+        // Force vertical layout for DForm typically
+        childrenContainerStyle.display = 'flex';
+        childrenContainerStyle.flexDirection = 'column';
+        childrenContainerStyle.gap = '5px';
+    }
+
+    // DGrid: CSS grid with fixed cell size (gridColWide × gridRowHeight, gridCols columns)
+    if (el.type === ComponentType.DGrid) {
+        const cols = el.props.gridCols ?? 4;
+        const cw = el.props.gridColWide ?? 50;
+        const rh = el.props.gridRowHeight ?? 50;
+        childrenContainerStyle.display = 'grid';
+        childrenContainerStyle.gridTemplateColumns = `repeat(${cols}, ${cw}px)`;
+        childrenContainerStyle.gridAutoRows = `${rh}px`;
+        childrenContainerStyle.gap = '0px';
+        delete (childrenContainerStyle as any).flexDirection;
+    }
+
+    // DIconLayout: flex-wrap with configurable spacing + outer border (padding)
+    if (el.type === ComponentType.DIconLayout) {
+        const sx = el.props.iconSpaceX ?? 5;
+        const sy = el.props.iconSpaceY ?? 5;
+        const border = el.props.iconBorder ?? 0;
+        const dir = el.props.iconLayoutDir || 'TOP';
+        childrenContainerStyle.display = 'flex';
+        // LEFT = wrap horizontally (rows of items, wrapping when full)
+        // TOP = wrap vertically (columns of items)
+        childrenContainerStyle.flexDirection = dir === 'LEFT' ? 'row' : 'column';
+        childrenContainerStyle.flexWrap = 'wrap';
+        childrenContainerStyle.gap = `${sy}px ${sx}px`;
+        childrenContainerStyle.padding = `${border}px`;
+    }
+
+    const handleDoubleClick = (e: React.MouseEvent) => {
+      if (!TEXT_EDITABLE_TYPES.has(el.type)) return;
+      e.stopPropagation();
+      e.preventDefault();
+      onSelect(id);
+      setEditingId(id);
+    };
+
+    const handleContextMenu = (e: React.MouseEvent) => {
+      // Right-click opens the context menu. Selection rules:
+      //  - If the right-clicked element is already part of the multi-selection,
+      //    PRESERVE the selection (so context-menu actions can apply to all).
+      //  - Otherwise, select just this element (replacing any prior selection).
+      e.stopPropagation();
+      e.preventDefault();
+      if (!state.selectedIds.includes(id)) {
+        onSelect(id);
+      }
+      setContextMenu({ x: e.clientX, y: e.clientY, elementId: id, submenu: null });
+    };
 
     return (
-      <div 
-        key={id} style={finalStyle} onMouseDown={handleMouseDown}
-        onMouseEnter={() => setHoveredId(id)} onMouseLeave={() => setHoveredId(null)}
-        className={`group select-none ${isSelected ? 'ring-2 ring-blue-500' : ''}`}
+      <div
+        key={id}
+        style={finalStyle}
+        onMouseDown={handleMouseDown}
+        onDoubleClick={handleDoubleClick}
+        onContextMenu={handleContextMenu}
+        onMouseEnter={() => setHoveredId(id)}
+        onMouseLeave={() => setHoveredId(null)}
+        title={el.props.tooltip} // Native Tooltip
+        className={`group select-none ${isSelected ? 'outline outline-2 outline-blue-500' : (isMultiSelected && !groupBounds) ? 'outline-dashed outline-2 outline-blue-400/70' : ''}`}
       >
         {renderVGUIContent(el, isSelected)}
-        {renderLayoutIndicators()}
-        
-        {/* State Indicators Overlay */}
-        <div className="absolute top-0 right-0 p-1 flex gap-1 pointer-events-none z-20">
-             {!isVisible && (
-                 <div className="bg-red-500/80 rounded p-0.5" title="Hidden (SetVisible(false))">
-                     <EyeOff className="w-3 h-3 text-white" />
-                 </div>
-             )}
-             {!isEnabled && (
-                 <div className="bg-neutral-600/80 rounded p-0.5" title="Disabled (SetEnabled(false))">
-                     <Lock className="w-3 h-3 text-white" />
-                 </div>
-             )}
-        </div>
 
-        <div className={childrenContainerClass}>
-             <div style={containerStyle} className="custom-scrollbar">
-                 {el.children.map(childId => renderElement(childId))}
-             </div>
-        </div>
+        {/* Children container — fills the parent edge-to-edge so child x/y are
+            measured from the parent's actual top-left, matching gmod's
+            :SetPos(x, y) semantics. (A child at y=0 of a DFrame WILL overlap
+            the title bar — that's what happens in-game.)
+            DCollapsibleCategory still gates child visibility on its expanded state. */}
+        {!(el.type === ComponentType.DCollapsibleCategory && el.props.expanded === false) && (
+          <div className="absolute inset-0 pointer-events-none">
+               <div style={childrenContainerStyle} className="custom-scrollbar">
+                   {el.children.map(childId => renderElement(childId))}
+               </div>
+          </div>
+        )}
+
         {isSelected && renderResizeHandles(el)}
+
+        {isHovered && renderHoverToolbar(el, lockedEffectively)}
       </div>
     );
   };
 
+  // ──────────────────────────────────────────────────────────────────────
+  // Context menu (right-click)
+  // ──────────────────────────────────────────────────────────────────────
+  // Each menu item is { label, icon?, onClick?, disabled?, separator?, hasSubmenu? }.
+  type CMenuItem = {
+    label?: string;
+    icon?: React.ReactNode;
+    onClick?: () => void;
+    disabled?: boolean;
+    separator?: boolean;
+    hasSubmenu?: boolean;
+    onHover?: () => void;
+    danger?: boolean;
+    isHeader?: boolean;
+  };
+
+  // Helpers used by the new selection menu items.
+  const collectDescendants = (rootId: string): string[] => {
+    const out: string[] = [];
+    const walk = (id: string) => {
+      out.push(id);
+      state.elements[id]?.children.forEach(walk);
+    };
+    walk(rootId);
+    return out;
+  };
+
+  const collectAncestors = (id: string): string[] => {
+    const out: string[] = [id];
+    let curr = state.elements[id];
+    while (curr && curr.parentId) {
+      out.push(curr.parentId);
+      curr = state.elements[curr.parentId];
+    }
+    return out;
+  };
+
+  const buildContextMenuItems = (el: UIElement): CMenuItem[] => {
+    const lockedEff = isEffectivelyLocked(el.id);
+    const parent = el.parentId ? state.elements[el.parentId] : null;
+    const grandparent = parent?.parentId ? state.elements[parent.parentId] : null;
+    const isRoot = el.type === ComponentType.DFrame;
+
+    // Bulk-aware: when the right-clicked element is in an active multi-selection
+    // (>1 elements), Lock & Delete operate on the whole selection. Other actions
+    // stay element-scoped because their semantics aren't well-defined for multi
+    // (e.g. Stretch to Fit Parent — to which parent?).
+    const selectedSet = state.selectedIds;
+    const isInMulti = selectedSet.length > 1 && selectedSet.includes(el.id);
+    const isSelected = selectedSet.includes(el.id);
+
+    const items: CMenuItem[] = [];
+
+    // Multi-selection header (informational, not clickable)
+    if (isInMulti) {
+      items.push({ isHeader: true, label: `${selectedSet.length} elements selected` });
+      items.push({ separator: true });
+    }
+
+    // ── Element-specific actions (top of menu, before universals) ──
+    const specifics = getElementSpecificMenuItems(el);
+    if (specifics.length > 0) {
+      items.push(...specifics, { separator: true });
+    }
+
+    // ── Selection actions (the 3 user-requested global items) ──
+    items.push({
+      label: isSelected ? 'Deselect' : 'Select',
+      icon: <Check className="w-3 h-3" />,
+      onClick: () => onToggleSelection?.(el.id),
+    });
+    items.push({
+      label: 'Select All Children',
+      icon: <ChevronRight className="w-3 h-3" />,
+      onClick: () => onSelectMany?.(collectDescendants(el.id)),
+      disabled: el.children.length === 0,
+    });
+    items.push({
+      label: 'Select All Parents',
+      icon: <ChevronRight className="w-3 h-3 rotate-180" />,
+      onClick: () => onSelectMany?.(collectAncestors(el.id)),
+      disabled: !el.parentId,
+    });
+
+    items.push({ separator: true });
+
+    // ── Universal actions ──
+    items.push({
+      label: isInMulti
+        ? (el.props.locked ? `Unlock (${selectedSet.length})` : `Lock (${selectedSet.length})`)
+        : (el.props.locked ? 'Unlock' : 'Lock'),
+      icon: el.props.locked ? <LockOpen className="w-3 h-3" /> : <Lock className="w-3 h-3" />,
+      onClick: () => {
+        if (isInMulti) {
+          // Toggle each selected element's own locked state. We base the new value
+          // on the right-clicked element so all targets land in the same state.
+          const newLocked = !el.props.locked;
+          for (const sid of selectedSet) onUpdateElement(sid, { locked: newLocked });
+        } else {
+          toggleLock(el.id);
+        }
+      },
+    });
+
+    items.push({
+      label: 'Parent',
+      icon: <LinkIcon className="w-3 h-3" />,
+      hasSubmenu: true,
+      disabled: isRoot,
+      onHover: () => setContextMenu(prev => prev ? { ...prev, submenu: 'parent' } : null),
+    });
+    items.push({
+      label: 'Unparent',
+      icon: <Unlink className="w-3 h-3" />,
+      onClick: () => onUnparent?.(el.id),
+      disabled: isRoot || !grandparent,
+    });
+
+    items.push({
+      label: 'Group (wrap in DPanel)',
+      icon: <Group className="w-3 h-3" />,
+      onClick: () => onGroup?.(el.id),
+      disabled: isRoot,
+    });
+    items.push({
+      label: 'Ungroup (move children up)',
+      icon: <Ungroup className="w-3 h-3" />,
+      onClick: () => onUngroup?.(el.id),
+      disabled: isRoot || el.children.length === 0,
+    });
+
+    items.push({
+      label: 'Stretch to Fit Parent',
+      icon: <Maximize2 className="w-3 h-3" />,
+      onClick: () => fillParent(el.id),
+      disabled: !el.parentId || lockedEff,
+    });
+    items.push({
+      label: 'Shrink to Fit Contents',
+      icon: <Minimize2 className="w-3 h-3" />,
+      onClick: () => onShrinkToFit?.(el.id),
+      disabled: el.children.length === 0 || lockedEff,
+    });
+
+    items.push({
+      label: 'Edit Properties',
+      icon: <Settings2 className="w-3 h-3" />,
+      onClick: () => onSelect(el.id), // collapses any multi-selection too
+    });
+
+    // Global reference action — opens the element's Gmod Wiki page in a new tab.
+    // URL strategy lives in utils/componentDefinitions.ts → getGmodWikiUrl.
+    items.push({
+      label: 'Gmod Wiki',
+      icon: <Globe className="w-3 h-3" />,
+      onClick: () => {
+        const url = getGmodWikiUrl(el.type);
+        if (url) window.open(url, '_blank', 'noopener,noreferrer');
+      },
+    });
+
+    items.push({ separator: true });
+
+    items.push({
+      label: 'Duplicate',
+      icon: <CopyIcon className="w-3 h-3" />,
+      onClick: () => onDuplicate?.(),
+      disabled: isRoot,
+    });
+
+    items.push({
+      label: isInMulti ? `Delete (${selectedSet.length})` : 'Delete',
+      icon: <Trash2 className="w-3 h-3" />,
+      onClick: () => {
+        if (isInMulti) onDeleteMany?.(selectedSet);
+        else onDeleteElement?.(el.id);
+      },
+      danger: true,
+    });
+
+    return items;
+  };
+
+  // Element-type-specific quick actions, surfaced at the top of the context menu.
+  const getElementSpecificMenuItems = (el: UIElement): CMenuItem[] => {
+    switch (el.type) {
+      case ComponentType.DCheckBox:
+        return [{
+          label: el.props.checked ? 'Uncheck' : 'Check',
+          icon: <Check className="w-3 h-3" />,
+          onClick: () => onUpdateElement(el.id, { checked: !el.props.checked }),
+        }];
+
+      case ComponentType.DCollapsibleCategory:
+        return [{
+          label: el.props.expanded === false ? 'Expand' : 'Collapse',
+          icon: <ChevronRight className="w-3 h-3" />,
+          onClick: () => onUpdateElement(el.id, { expanded: el.props.expanded === false }),
+        }];
+
+      case ComponentType.DTextEntry:
+        return [{
+          label: el.props.entryMultiline ? 'Switch to Single-Line' : 'Switch to Multi-Line',
+          icon: <TypeIcon className="w-3 h-3" />,
+          onClick: () => onUpdateElement(el.id, { entryMultiline: !el.props.entryMultiline }),
+        }];
+
+      case ComponentType.DButton:
+        return [{
+          label: el.props.buttonEnabled === false ? 'Enable' : 'Disable',
+          icon: <Square className="w-3 h-3" />,
+          onClick: () => onUpdateElement(el.id, { buttonEnabled: el.props.buttonEnabled === false }),
+        }];
+
+      case ComponentType.DFrame:
+        return [{
+          label: el.props.showCloseButton === false ? 'Show Close Button' : 'Hide Close Button',
+          icon: <X className="w-3 h-3" />,
+          onClick: () => onUpdateElement(el.id, { showCloseButton: el.props.showCloseButton === false }),
+        }];
+
+      case ComponentType.DImage:
+      case ComponentType.DImageButton:
+        return [{
+          label: 'Clear Image',
+          icon: <ImageOff className="w-3 h-3" />,
+          onClick: () => onUpdateElement(el.id, { imageUrl: undefined }),
+          disabled: !el.props.imageUrl,
+        }];
+
+      case ComponentType.DPanel:
+        return [{
+          label: el.props.panelPaintBackground === false ? 'Show Background' : 'Hide Background',
+          icon: <Square className="w-3 h-3" />,
+          onClick: () => onUpdateElement(el.id, { panelPaintBackground: el.props.panelPaintBackground === false }),
+        }];
+
+      case ComponentType.DSlider:
+      case ComponentType.DColorCube:
+        return [{
+          label: 'Reset Knob to Center',
+          icon: <Settings2 className="w-3 h-3" />,
+          onClick: () => onUpdateElement(el.id, { sliderX: 0.5, sliderY: 0.5 }),
+        }];
+
+      case ComponentType.DNumSlider:
+      case ComponentType.DNumberWang: {
+        const min = el.props.sliderMin ?? 0;
+        const max = el.props.sliderMax ?? 100;
+        return [{
+          label: 'Reset Value to Min',
+          icon: <Settings2 className="w-3 h-3" />,
+          onClick: () => onUpdateElement(el.id, { sliderValue: min }),
+        }, {
+          label: 'Reset Value to Max',
+          icon: <Settings2 className="w-3 h-3" />,
+          onClick: () => onUpdateElement(el.id, { sliderValue: max }),
+        }];
+      }
+
+      case ComponentType.DProgress:
+        return [{
+          label: 'Reset Progress to 0',
+          icon: <Settings2 className="w-3 h-3" />,
+          onClick: () => onUpdateElement(el.id, { progressFraction: 0 }),
+        }, {
+          label: 'Set Progress to Full',
+          icon: <Settings2 className="w-3 h-3" />,
+          onClick: () => onUpdateElement(el.id, { progressFraction: 1 }),
+        }];
+
+      default:
+        return [];
+    }
+  };
+
+  const renderContextMenu = () => {
+    if (!contextMenu) return null;
+    const el = state.elements[contextMenu.elementId];
+    if (!el) return null;
+    const items = buildContextMenuItems(el);
+
+    // Keep the menu inside the viewport (rough heuristic — assume ~250 wide × ~items*24 tall).
+    const menuW = 220;
+    const menuH = items.length * 26 + 8;
+    const x = Math.min(contextMenu.x, window.innerWidth - menuW - 8);
+    const y = Math.min(contextMenu.y, window.innerHeight - menuH - 8);
+
+    const itemBaseStyle: React.CSSProperties = {
+      padding: '5px 10px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      fontSize: 11,
+      color: 'white',
+      cursor: 'pointer',
+      userSelect: 'none',
+      borderRadius: 3,
+    };
+
+    return (
+      <div
+        data-context-menu
+        style={{
+          position: 'fixed', left: x, top: y, zIndex: 1000,
+          background: '#262626',
+          border: '1px solid #000',
+          borderRadius: 6,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
+          minWidth: menuW,
+          padding: 4,
+        }}
+        onContextMenu={(e) => e.preventDefault()}
+      >
+        {items.map((item, i) => {
+          if (item.separator) {
+            return <div key={i} style={{ height: 1, background: '#3a3a3a', margin: '4px 2px' }} />;
+          }
+          if (item.isHeader) {
+            return (
+              <div key={i} style={{ padding: '4px 10px', fontSize: 10, fontWeight: 600, color: '#3b82f6', textTransform: 'uppercase', letterSpacing: 0.5, userSelect: 'none' }}>
+                {item.label}
+              </div>
+            );
+          }
+          return (
+            <div
+              key={i}
+              style={{
+                ...itemBaseStyle,
+                opacity: item.disabled ? 0.35 : 1,
+                cursor: item.disabled ? 'not-allowed' : 'pointer',
+                color: item.danger ? '#fca5a5' : 'white',
+              }}
+              onMouseEnter={(e) => {
+                if (!item.disabled) {
+                  (e.currentTarget as HTMLDivElement).style.background = item.danger ? '#7f1d1d' : '#3b82f6';
+                }
+                if (item.onHover) item.onHover();
+                else if (!item.hasSubmenu) {
+                  // Hovering a non-submenu item closes any open submenu
+                  setContextMenu(prev => prev && prev.submenu ? { ...prev, submenu: null } : prev);
+                }
+              }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
+              onClick={() => {
+                if (item.disabled || item.hasSubmenu) return;
+                item.onClick?.();
+                setContextMenu(null);
+              }}
+            >
+              <span style={{ width: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.85 }}>
+                {item.icon}
+              </span>
+              <span style={{ flex: 1 }}>{item.label}</span>
+              {item.hasSubmenu && <ChevronRight className="w-3 h-3 opacity-60" />}
+            </div>
+          );
+        })}
+
+        {/* Parent submenu (anchored to right of main menu) */}
+        {contextMenu.submenu === 'parent' && renderParentSubmenu(el, x + menuW + 4, y)}
+      </div>
+    );
+  };
+
+  // Submenu listing valid parents the element can be reparented to.
+  const renderParentSubmenu = (el: UIElement, x: number, y: number) => {
+    const validParentTypes = new Set<ComponentType>([
+      ComponentType.DFrame, ComponentType.DPanel, ComponentType.DScrollPanel,
+      ComponentType.DPropertySheet, ComponentType.DColumnSheet, ComponentType.DTab,
+      ComponentType.DForm, ComponentType.DCollapsibleCategory, ComponentType.DVerticalDivider,
+      ComponentType.DBevel, ComponentType.DGrid, ComponentType.DIconLayout,
+    ]);
+    // Build set of descendants so we don't allow parenting into self/own subtree.
+    const descendants = new Set<string>();
+    const collect = (id: string) => {
+      descendants.add(id);
+      state.elements[id]?.children.forEach(collect);
+    };
+    collect(el.id);
+
+    const candidates = (Object.values(state.elements) as UIElement[])
+      .filter(e => validParentTypes.has(e.type) && !descendants.has(e.id) && e.id !== el.parentId)
+      .sort((a, b) => a.props.variableName.localeCompare(b.props.variableName));
+
+    return (
+      <div
+        data-context-menu
+        style={{
+          position: 'fixed', left: x, top: y, zIndex: 1001,
+          background: '#262626',
+          border: '1px solid #000',
+          borderRadius: 6,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
+          minWidth: 180,
+          maxHeight: 320,
+          overflowY: 'auto',
+          padding: 4,
+        }}
+      >
+        {candidates.length === 0 && (
+          <div style={{ padding: '6px 10px', fontSize: 11, color: '#888' }}>(No valid parents)</div>
+        )}
+        {candidates.map(p => (
+          <div
+            key={p.id}
+            style={{
+              padding: '5px 10px',
+              fontSize: 11,
+              color: 'white',
+              cursor: 'pointer',
+              borderRadius: 3,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 1,
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#3b82f6'; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
+            onClick={() => {
+              onReparent?.(el.id, p.id);
+              setContextMenu(null);
+            }}
+          >
+            <span style={{ fontFamily: 'monospace' }}>{p.props.variableName}</span>
+            <span style={{ fontSize: 9, opacity: 0.6 }}>{p.type}</span>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  // Floating action toolbar shown in the top-right of an element while hovered.
+  // Each button uses stopPropagation on mousedown/click so it never triggers the
+  // parent element's drag/select handlers.
+  const renderHoverToolbar = (el: UIElement, lockedEffectively: boolean) => {
+    // Scale the toolbar inversely with zoom so icons stay a constant pixel size
+    // regardless of how zoomed in the canvas is.
+    const z = viewState.zoom;
+    const btnSize = 16 / z;
+    const iconSize = 10 / z;
+    const gap = 4 / z;
+    const offset = 4 / z;
+
+    const stop = (e: React.MouseEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+    };
+
+    const baseBtn: React.CSSProperties = {
+      width: btnSize,
+      height: btnSize,
+      borderRadius: '50%',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      cursor: 'pointer',
+      border: `${1 / z}px solid rgba(0,0,0,0.6)`,
+      boxShadow: `0 ${1 / z}px ${3 / z}px rgba(0,0,0,0.4)`,
+      pointerEvents: 'auto',
+      color: 'white',
+    };
+
+    const lockColor = lockedEffectively ? '#ef4444' : '#22c55e'; // red / green
+    const LockIconComp = lockedEffectively ? Lock : LockOpen;
+    const lockTitle = lockedEffectively
+      ? (el.props.locked ? 'Unlock element' : 'Locked by parent')
+      : 'Lock element (prevents move/resize, cascades to children)';
+
+    return (
+      <div
+        style={{
+          position: 'absolute',
+          top: offset,
+          right: offset,
+          display: 'flex',
+          gap,
+          zIndex: 60,
+          pointerEvents: 'auto',
+        }}
+        onMouseDown={stop}
+        onDoubleClick={stop}
+      >
+        <button
+          type="button"
+          title="Delete element"
+          style={{ ...baseBtn, background: '#ef4444' }}
+          onMouseDown={stop}
+          onClick={(e) => { stop(e); onDeleteElement?.(el.id); }}
+        >
+          <X style={{ width: iconSize, height: iconSize }} strokeWidth={3} />
+        </button>
+        <button
+          type="button"
+          title={lockTitle}
+          style={{ ...baseBtn, background: lockColor }}
+          onMouseDown={stop}
+          onClick={(e) => { stop(e); toggleLock(el.id); }}
+        >
+          <LockIconComp style={{ width: iconSize, height: iconSize }} strokeWidth={2.5} />
+        </button>
+        <button
+          type="button"
+          title={el.parentId ? 'Fill parent' : 'No parent to fill'}
+          disabled={!el.parentId || lockedEffectively}
+          style={{
+            ...baseBtn,
+            background: '#3b82f6',
+            opacity: (!el.parentId || lockedEffectively) ? 0.4 : 1,
+            cursor: (!el.parentId || lockedEffectively) ? 'not-allowed' : 'pointer',
+          }}
+          onMouseDown={stop}
+          onClick={(e) => { stop(e); if (el.parentId && !lockedEffectively) fillParent(el.id); }}
+        >
+          <Maximize2 style={{ width: iconSize, height: iconSize }} strokeWidth={2.5} />
+        </button>
+      </div>
+    );
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Group bounding-box resize overlay
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const renderMultiSelectBox = (bounds: GroupBounds) => {
+    const z = viewState.zoom;
+    const hs = 8 / z; // handle size in canvas units
+    const dirs = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'] as const;
+    const OUTSET = 4 / z; // gap between element edges and the overlay border
+
+    const onHandleMouseDown = (e: React.MouseEvent, dir: string) => {
+      e.stopPropagation();
+      e.preventDefault();
+
+      // Snapshot per-element start state in props space.
+      const startElements = new Map<string, { x: number; y: number; w: number; h: number }>();
+      for (const id of bounds.ids) {
+        const el = state.elements[id];
+        if (!el) continue;
+        startElements.set(id, { x: el.props.x, y: el.props.y, w: el.props.w, h: el.props.h });
+      }
+
+      groupResizeDragRef.current = {
+        startMouseX: e.clientX,
+        startMouseY: e.clientY,
+        startBounds: { px: bounds.px, py: bounds.py, w: bounds.w, h: bounds.h },
+        startElements,
+        dir,
+      };
+
+      const handleMouseMove = (mv: MouseEvent) => {
+        const drag = groupResizeDragRef.current;
+        if (!drag) return;
+        const { startBounds: sb, startElements: se, dir: d } = drag;
+
+        const rawDx = (mv.clientX - drag.startMouseX) / z;
+        const rawDy = (mv.clientY - drag.startMouseY) / z;
+        const isShift = mv.shiftKey;
+        const isAlt   = mv.altKey;
+
+        // ── Step 1: compute new bounding box in props space ──────────────
+        let newPx = sb.px, newPy = sb.py, newW = sb.w, newH = sb.h;
+
+        if (isAlt) {
+          // Scale from center: both opposite edges move symmetrically.
+          if (d.includes('e')) { newPx = sb.px - rawDx;  newW = Math.max(20, sb.w + rawDx * 2); }
+          if (d.includes('w')) { newPx = sb.px + rawDx;  newW = Math.max(20, sb.w - rawDx * 2); }
+          if (d.includes('s')) { newPy = sb.py - rawDy;  newH = Math.max(20, sb.h + rawDy * 2); }
+          if (d.includes('n')) { newPy = sb.py + rawDy;  newH = Math.max(20, sb.h - rawDy * 2); }
+        } else {
+          // Standard: pin the opposite edge.
+          if (d.includes('e')) newW = Math.max(10, sb.w + rawDx);
+          if (d.includes('s')) newH = Math.max(10, sb.h + rawDy);
+          if (d.includes('w')) { const δ = Math.min(sb.w - 10, rawDx); newPx = sb.px + δ; newW = sb.w - δ; }
+          if (d.includes('n')) { const δ = Math.min(sb.h - 10, rawDy); newPy = sb.py + δ; newH = sb.h - δ; }
+        }
+
+        // ── Step 2: compute per-element patches ───────────────────────────
+        const patches: Array<{ id: string; props: Partial<UIElement['props']> }> = [];
+
+        if (isShift) {
+          // Proportional: positions and sizes scale relative to the anchor corner (or center).
+          const scaleX = newW / sb.w;
+          const scaleY = newH / sb.h;
+          const anchorPx = isAlt ? sb.px + sb.w / 2 : (d.includes('w') ? sb.px + sb.w : sb.px);
+          const anchorPy = isAlt ? sb.py + sb.h / 2 : (d.includes('n') ? sb.py + sb.h : sb.py);
+
+          for (const [id, start] of se) {
+            patches.push({
+              id,
+              props: {
+                x: snap(anchorPx + (start.x - anchorPx) * scaleX),
+                y: snap(anchorPy + (start.y - anchorPy) * scaleY),
+                w: snap(Math.max(10, start.w * scaleX)),
+                h: snap(Math.max(10, start.h * scaleY)),
+              },
+            });
+          }
+        } else {
+          // Uniform delta: each element's matching edges shift by the same raw pixel amount.
+          for (const [id, start] of se) {
+            const p: Partial<UIElement['props']> = {};
+            if (isAlt) {
+              if (d.includes('e')) { p.x = snap(start.x - rawDx); p.w = snap(Math.max(10, start.w + rawDx * 2)); }
+              if (d.includes('w')) { p.x = snap(start.x + rawDx); p.w = snap(Math.max(10, start.w - rawDx * 2)); }
+              if (d.includes('s')) { p.y = snap(start.y - rawDy); p.h = snap(Math.max(10, start.h + rawDy * 2)); }
+              if (d.includes('n')) { p.y = snap(start.y + rawDy); p.h = snap(Math.max(10, start.h - rawDy * 2)); }
+            } else {
+              if (d.includes('e')) p.w = snap(Math.max(10, start.w + rawDx));
+              if (d.includes('s')) p.h = snap(Math.max(10, start.h + rawDy));
+              if (d.includes('w')) { const δ = Math.min(start.w - 10, rawDx); p.x = snap(start.x + δ); p.w = snap(start.w - δ); }
+              if (d.includes('n')) { const δ = Math.min(start.h - 10, rawDy); p.y = snap(start.y + δ); p.h = snap(start.h - δ); }
+            }
+            if (Object.keys(p).length) patches.push({ id, props: p });
+          }
+        }
+
+        if (patches.length) onPatchMany?.(patches);
+      };
+
+      const handleMouseUp = () => {
+        groupResizeDragRef.current = null;
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+      };
+
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    };
+
+    const cursorMap: Record<string, string> = {
+      n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize',
+      ne: 'nesw-resize', sw: 'nesw-resize', nw: 'nwse-resize', se: 'nwse-resize',
+    };
+
+    const handleStyle = (dir: string): React.CSSProperties => {
+      const base: React.CSSProperties = {
+        position: 'absolute', width: hs, height: hs,
+        backgroundColor: '#3b82f6', border: `${1 / z}px solid white`,
+        zIndex: 200, pointerEvents: 'auto', cursor: cursorMap[dir] || 'pointer',
+      };
+      if (dir === 'n')  { base.top = -hs / 2; base.left = '50%'; base.transform = 'translateX(-50%)'; }
+      if (dir === 's')  { base.bottom = -hs / 2; base.left = '50%'; base.transform = 'translateX(-50%)'; }
+      if (dir === 'w')  { base.left = -hs / 2; base.top = '50%'; base.transform = 'translateY(-50%)'; }
+      if (dir === 'e')  { base.right = -hs / 2; base.top = '50%'; base.transform = 'translateY(-50%)'; }
+      if (dir === 'nw') { base.top = -hs / 2; base.left = -hs / 2; }
+      if (dir === 'ne') { base.top = -hs / 2; base.right = -hs / 2; }
+      if (dir === 'sw') { base.bottom = -hs / 2; base.left = -hs / 2; }
+      if (dir === 'se') { base.bottom = -hs / 2; base.right = -hs / 2; }
+      return base;
+    };
+
+    return (
+      <div
+        style={{
+          position: 'absolute',
+          left: bounds.x - OUTSET,
+          top: bounds.y - OUTSET,
+          width: bounds.w + OUTSET * 2,
+          height: bounds.h + OUTSET * 2,
+          border: `${1 / z}px dashed rgba(59,130,246,0.85)`,
+          pointerEvents: 'none',
+          zIndex: 150,
+          boxSizing: 'border-box',
+        }}
+      >
+        {dirs.map(dir => (
+          <div key={dir} style={handleStyle(dir)} onMouseDown={(e) => onHandleMouseDown(e, dir)} />
+        ))}
+      </div>
+    );
+  };
+
+  // Assign groupBounds now — renderElement (called during the return) reads this via closure.
+  groupBounds = computeGroupBounds();
+
   return (
     <div className="flex-1 bg-[#151515] relative overflow-hidden flex flex-col">
+       {/* Canvas Toolbar */}
        <div className="absolute top-4 right-4 z-20 flex flex-col gap-2 pointer-events-auto">
             <div className="bg-neutral-800/80 backdrop-blur border border-neutral-700 rounded-lg p-1 flex flex-col shadow-xl">
-                <button onClick={() => onViewChange({...viewState, zoom: Math.min(5, viewState.zoom + 0.1)})} className="p-2 hover:bg-neutral-700 rounded text-neutral-300 hover:text-white"><ZoomIn className="w-4 h-4" /></button>
-                <button onClick={() => onViewChange({...viewState, zoom: Math.max(0.1, viewState.zoom - 0.1)})} className="p-2 hover:bg-neutral-700 rounded text-neutral-300 hover:text-white"><ZoomOut className="w-4 h-4" /></button>
-                <button onClick={() => onViewChange({...viewState, showGrid: !viewState.showGrid})} className={`p-2 rounded ${viewState.showGrid ? 'text-blue-400 bg-blue-900/20' : 'text-neutral-400 hover:bg-neutral-700'}`}><GridIcon className="w-4 h-4" /></button>
+                <button onClick={() => onViewChange({...viewState, zoom: Math.min(5, viewState.zoom + 0.1)})} className="p-2 hover:bg-neutral-700 rounded text-neutral-300 hover:text-white transition-colors" title="Zoom In"><ZoomIn className="w-4 h-4" /></button>
+                <button onClick={() => onViewChange({...viewState, zoom: Math.max(0.1, viewState.zoom - 0.1)})} className="p-2 hover:bg-neutral-700 rounded text-neutral-300 hover:text-white transition-colors" title="Zoom Out"><ZoomOut className="w-4 h-4" /></button>
+                <button onClick={() => onViewChange({...viewState, showGrid: !viewState.showGrid})} className={`p-2 rounded transition-colors ${viewState.showGrid ? 'text-blue-400 bg-blue-900/20' : 'text-neutral-400 hover:text-white hover:bg-neutral-700'}`} title="Toggle Grid"><GridIcon className="w-4 h-4" /></button>
+                <div className="h-px bg-neutral-700 my-1"></div>
+                <button onClick={() => onViewChange({...viewState, zoom: 1, panX: 0, panY: 0})} className="p-2 hover:bg-neutral-700 rounded text-neutral-300 hover:text-white transition-colors text-xs font-bold" title="Reset View">1:1</button>
             </div>
        </div>
-        <div 
-          ref={containerRef} className="flex-1 relative overflow-hidden"
-          onWheel={handleWheel} onMouseDown={startPan}
-          style={{ cursor: isPanning ? 'grabbing' : 'default', backgroundImage: viewState.showGrid ? 'radial-gradient(#444 1px, transparent 1px)' : undefined, backgroundSize: `${viewState.gridSize * viewState.zoom}px ${viewState.gridSize * viewState.zoom}px`, backgroundPosition: `${viewState.panX}px ${viewState.panY}px` }}
+
+        <div
+          ref={containerRef}
+          className="flex-1 relative overflow-hidden"
+          onWheel={handleWheel}
+          onMouseDown={startPan}
+          onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}
+          style={{
+            cursor: isPanning ? 'grabbing' : 'default',
+            backgroundImage: viewState.showGrid ? 'radial-gradient(#444 1px, transparent 1px)' : undefined,
+            backgroundSize: `${viewState.gridSize * viewState.zoom}px ${viewState.gridSize * viewState.zoom}px`,
+            backgroundPosition: `${viewState.panX}px ${viewState.panY}px`
+          }}
         >
-            <div className="absolute transform-gpu origin-top-left" style={{ transform: `translate(${viewState.panX}px, ${viewState.panY}px) scale(${viewState.zoom})`, width: '100%', height: '100%' }}>
+            <div 
+                className="absolute transform-gpu origin-top-left"
+                style={{
+                    transform: `translate(${viewState.panX}px, ${viewState.panY}px) scale(${viewState.zoom})`,
+                    width: '100%',
+                    height: '100%'
+                }}
+            >
                 {state.rootId ? renderElement(state.rootId) : (
                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ transform: `scale(${1/viewState.zoom})` }}>
-                        <div className="text-center text-neutral-600 bg-neutral-900/50 p-6 rounded-xl border border-neutral-800">
+                        <div className="text-center text-neutral-600 bg-neutral-900/50 p-6 rounded-xl border border-neutral-800 backdrop-blur-sm">
                             <p className="text-xl font-bold mb-2">Empty Canvas</p>
                             <p className="text-sm">Add a DFrame to start building your UI.</p>
                         </div>
                     </div>
                 )}
+                {groupBounds && renderMultiSelectBox(groupBounds)}
             </div>
         </div>
+        
         <div className="h-6 bg-neutral-900 border-t border-neutral-800 flex items-center px-4 text-[10px] text-neutral-500 space-x-4 z-10">
             <span>Zoom: {Math.round(viewState.zoom * 100)}%</span>
             <span>Grid: {viewState.showGrid ? `${viewState.gridSize}px` : 'Off'}</span>
         </div>
+
+        {/* Right-click context menu — rendered last so it overlays everything. */}
+        {renderContextMenu()}
     </div>
   );
 };

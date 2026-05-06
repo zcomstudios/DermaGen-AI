@@ -73,3 +73,51 @@ export const getMethodsForComponent = (type: ComponentType): MethodSignature[] =
   const specific = COMPONENT_METHODS[type] || [];
   return [...specific, ...COMMON_PANEL_METHODS].sort((a, b) => a.name.localeCompare(b.name));
 };
+
+const WIKI_BASE = 'https://wiki.facepunch.com/gmod/';
+
+const WIKI_SLUGS: Partial<Record<ComponentType, string>> = {
+  [ComponentType.DFrame]: 'DFrame',
+  [ComponentType.DPanel]: 'DPanel',
+  [ComponentType.DButton]: 'DButton',
+  [ComponentType.DLabel]: 'DLabel',
+  [ComponentType.DTextEntry]: 'DTextEntry',
+  [ComponentType.DCheckBox]: 'DCheckBox',
+  [ComponentType.DComboBox]: 'DComboBox',
+  [ComponentType.DListView]: 'DListView',
+  [ComponentType.DGrid]: 'DGrid',
+  [ComponentType.DImage]: 'DImage',
+  [ComponentType.DPropertySheet]: 'DPropertySheet',
+  [ComponentType.DTab]: 'DTab',
+  [ComponentType.DForm]: 'DForm',
+  [ComponentType.DModelPanel]: 'DModelPanel',
+  [ComponentType.DIconLayout]: 'DIconLayout',
+  [ComponentType.DTree]: 'DTree',
+  [ComponentType.DCollapsibleCategory]: 'DCollapsibleCategory',
+  [ComponentType.DNumSlider]: 'DNumSlider',
+  [ComponentType.DVerticalDivider]: 'DVerticalDivider',
+  [ComponentType.DHorizontalDivider]: 'DHorizontalDivider',
+  [ComponentType.DMenuBar]: 'DMenuBar',
+  [ComponentType.DMenu]: 'DMenu',
+  [ComponentType.DHTML]: 'DHTML',
+  [ComponentType.DBinder]: 'DBinder',
+  [ComponentType.DColorCube]: 'DColorCube',
+  [ComponentType.DColorPalette]: 'DColorPalette',
+  [ComponentType.DColorMixer]: 'DColorMixer',
+  [ComponentType.DSlider]: 'DSlider',
+  [ComponentType.DImageButton]: 'DImageButton',
+  [ComponentType.DNotify]: 'DNotify',
+  [ComponentType.DProgress]: 'DProgress',
+  [ComponentType.DRichText]: 'DRichText',
+  [ComponentType.DSysButton]: 'DSysButton',
+  [ComponentType.DTooltip]: 'DTooltip',
+  [ComponentType.DNumberWang]: 'DNumberWang',
+  [ComponentType.DBevel]: 'DBevel',
+  [ComponentType.DScrollPanel]: 'DScrollPanel',
+  [ComponentType.DColumnSheet]: 'DColumnSheet',
+};
+
+export const getGmodWikiUrl = (type: ComponentType): string | null => {
+  const slug = WIKI_SLUGS[type];
+  return slug ? `${WIKI_BASE}${slug}` : null;
+};

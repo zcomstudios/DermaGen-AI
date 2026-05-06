@@ -91,7 +91,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onAddComponent }) => {
   };
 
   return (
-    <div className="w-full h-full bg-neutral-900 flex flex-col shrink-0 overflow-hidden z-10">
+    <div className="w-64 bg-neutral-900 border-r border-neutral-800 flex flex-col shrink-0 overflow-hidden z-10">
       <div className="p-4 border-b border-neutral-800 bg-neutral-900">
         <h2 className="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-3">Components</h2>
         <div className="relative">
