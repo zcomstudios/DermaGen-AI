@@ -31,28 +31,33 @@ export const SKIN_DEFAULTS = {
  * `panelPaintBackground === false` on a DPanel makes it transparent — in that
  * case we keep walking up.
  */
+// Minimal shape of the effective-skin preview needed for parent-bg resolution.
+// SKIN_DEFAULTS is a superset, so it is the back-compatible default.
+type BgSkin = { frame: string; panel: string; bevel: string; form: string; collapsible: string };
+
 export function getEffectiveParentBg(
   el: UIElement,
   elements: Record<string, UIElement>,
+  skin: BgSkin = SKIN_DEFAULTS,
 ): string | null {
   let curr = el.parentId ? elements[el.parentId] : undefined;
   while (curr) {
     // User-set color always wins
     if (curr.props.color) return curr.props.color;
 
-    // Per-type defaults
+    // Per-type defaults (from the active skin's effective preview colors)
     switch (curr.type) {
-      case ComponentType.DFrame:                return SKIN_DEFAULTS.frame;
+      case ComponentType.DFrame:                return skin.frame;
       case ComponentType.DPanel:
         if (curr.props.panelPaintBackground === false) break; // transparent — keep walking
-        return SKIN_DEFAULTS.panel;
-      case ComponentType.DScrollPanel:          return SKIN_DEFAULTS.panel;
-      case ComponentType.DTab:                  return SKIN_DEFAULTS.panel;
-      case ComponentType.DBevel:                return SKIN_DEFAULTS.bevel;
-      case ComponentType.DForm:                 return SKIN_DEFAULTS.form;
-      case ComponentType.DCollapsibleCategory:  return SKIN_DEFAULTS.collapsible;
-      case ComponentType.DPropertySheet:        return SKIN_DEFAULTS.panel;
-      case ComponentType.DColumnSheet:          return SKIN_DEFAULTS.panel;
+        return skin.panel;
+      case ComponentType.DScrollPanel:          return skin.panel;
+      case ComponentType.DTab:                  return skin.panel;
+      case ComponentType.DBevel:                return skin.bevel;
+      case ComponentType.DForm:                 return skin.form;
+      case ComponentType.DCollapsibleCategory:  return skin.collapsible;
+      case ComponentType.DPropertySheet:        return skin.panel;
+      case ComponentType.DColumnSheet:          return skin.panel;
       // Other container types (DGrid, DIconLayout, DVerticalDivider) are usually
       // transparent / parent-driven — walk up.
     }
