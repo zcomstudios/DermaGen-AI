@@ -1,5 +1,6 @@
 import { EditorState, UIElement, ComponentType } from '../types';
 import { getMethodsForComponent } from './componentDefinitions';
+import { getDynamicPanel } from './dynamicPanelRegistry';
 
 const hexToRgb = (hex: string) => {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -18,9 +19,14 @@ const createFontName = (family: string, size: number, weight: number) => {
     return `${family.replace(/\s+/g, '')}_${size}_${weight}`;
 };
 
-export const generateLuaCode = (state: EditorState): string => {
+export const generateLuaCode = (state: EditorState, opts?: { skinName?: string }): string => {
   const { elements, rootId } = state;
   if (!rootId) return "-- Add a DFrame to start";
+
+  // Sanitize an active custom-skin name for the root SetSkin() line.
+  const activeSkinName = opts?.skinName
+    ? opts.skinName.replace(/[^A-Za-z0-9_]/g, '')
+    : '';
 
   const lines: string[] = [];
   
@@ -62,7 +68,11 @@ export const generateLuaCode = (state: EditorState): string => {
          lines.push(`${varName}:SetPos(${el.props.x}, ${el.props.y})`);
     }
 
-    if (isRoot) lines.push(`${varName}:MakePopup()`);
+    if (isRoot) {
+        lines.push(`${varName}:MakePopup()`);
+        // Apply the active custom skin to the root (children inherit).
+        if (activeSkinName) lines.push(`${varName}:SetSkin("${activeSkinName}")`);
+    }
 
     if (el.props.layoutMode && el.props.layoutMode !== 'none' && el.props.layoutPadding) {
         lines.push(`${varName}:DockPadding(${el.props.layoutPadding}, ${el.props.layoutPadding}, ${el.props.layoutPadding}, ${el.props.layoutPadding})`);
@@ -154,6 +164,21 @@ export const generateLuaCode = (state: EditorState): string => {
          lines.push(`end`);
     }
     
+    // Properties of runtime-imported panels (Set* calls from AccessorFunc pairs)
+    if (el.props.customProps) {
+        const dynDef = getDynamicPanel(el.type);
+        Object.entries(el.props.customProps).forEach(([key, value]) => {
+            if (value === undefined || value === '') return;
+            const prop = dynDef?.properties.find(p => p.name === key);
+            const setter = prop?.setter || `Set${key}`;
+            let literal: string;
+            if (typeof value === 'boolean') literal = value ? 'true' : 'false';
+            else if (typeof value === 'number') literal = `${value}`;
+            else literal = `"${String(value).replace(/"/g, '\\"')}"`;
+            lines.push(`${varName}:${setter}(${literal})`);
+        });
+    }
+
     // Add custom methods
     if (el.props.methods) {
         Object.entries(el.props.methods).forEach(([methodName, code]) => {

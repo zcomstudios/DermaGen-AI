@@ -1,8 +1,11 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { EditorState, UIElement, ComponentType, ViewState } from '../types';
 import { resolveDermaFont } from '../utils/dermaFonts';
-import { SKIN_DEFAULTS, getEffectiveParentBg, getReadableTextColor } from '../utils/skinDefaults';
+import { getEffectiveParentBg, getReadableTextColor } from '../utils/skinDefaults';
+import { useActiveEffectiveSkin } from '../utils/skinResolver';
 import { getGmodWikiUrl } from '../utils/componentDefinitions';
+import { getDynamicPanel } from '../utils/dynamicPanelRegistry';
+import { renderDynamicPanel } from './DynamicPanelRenderer';
 import { ZoomIn, ZoomOut, Grid as GridIcon, ImageOff, Cuboid, X, Lock, LockOpen, Maximize2, Globe, Trash2, Settings2, Group, Ungroup, Minimize2, Link as LinkIcon, Unlink, ChevronRight, Copy as CopyIcon, Check, Square, Type as TypeIcon } from 'lucide-react';
 
 // Component types whose visible text can be edited inline by double-clicking.
@@ -38,6 +41,10 @@ interface CanvasProps {
 }
 
 const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSelection, onSelectMany, onUpdateElement, onPatchMany, onViewChange, onDeleteElement, onDeleteMany, onReparent, onGroup, onUngroup, onShrinkToFit, onUnparent, onDuplicate }) => {
+  // Active skin's effective preview colors. Re-renders live when the active
+  // skin changes or is edited (useSyncExternalStore). Baseline == SKIN_DEFAULTS
+  // when no custom skin is active (zero visual regression).
+  const skin = useActiveEffectiveSkin().preview;
   const containerRef = useRef<HTMLDivElement>(null);
   const [isPanning, setIsPanning] = useState(false);
   const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
@@ -432,7 +439,7 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
               return (
                   <div
                       className="flex flex-col h-full w-full bg-[#323232] shadow-xl"
-                      style={{ ...commonStyle, backgroundColor: bgColor || '#323232', overflow: 'hidden', ...blurStyle }}
+                      style={{ ...commonStyle, backgroundColor: bgColor || skin.frame, overflow: 'hidden', ...blurStyle }}
                   >
                       <div
                         className="h-6 flex items-center px-2 border-b border-black/40 shrink-0 dframe-titlebar gap-1.5"
@@ -445,7 +452,8 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
                                   title={el.props.frameIcon}
                               />
                           )}
-                          {editableText(el, el.props.text || 'DFrame', `${baseText} text-white/90 font-bold`, titleBarStyle)}
+                          {/* Colours.Window.TitleActive override (skin.frameTitleText); else white/90 class. */}
+                          {editableText(el, el.props.text || 'DFrame', `${baseText} font-bold ${skin.frameTitleText ? '' : 'text-white/90'}`, { ...titleBarStyle, color: skin.frameTitleText })}
                           <div className="ml-auto flex gap-1 opacity-60">
                               <div className="w-3 h-3 bg-white/10 rounded-sm hover:bg-white/20"></div>
                               {el.props.showCloseButton !== false && (
@@ -474,9 +482,10 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
               // both light defaults and user-set dark themes.
               const disabled = el.props.buttonEnabled === false;
               const buttonBg = bgColor
-                  ?? (disabled ? SKIN_DEFAULTS.buttonDisabled
-                              : (isHovered ? SKIN_DEFAULTS.buttonHover : SKIN_DEFAULTS.buttonNormal));
-              const buttonText = getReadableTextColor(buttonBg);
+                  ?? (disabled ? skin.buttonDisabled
+                              : (isHovered ? skin.buttonHover : skin.buttonNormal));
+              // colButtonText override wins (skin.buttonText); else derive readable.
+              const buttonText = skin.buttonText ?? getReadableTextColor(buttonBg);
               return (
                   <div
                       className="w-full h-full border border-black/50 flex items-center shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] px-2 gap-1.5"
@@ -501,7 +510,8 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
           }
           
           case ComponentType.DTextEntry: {
-              const textColor = el.props.entryTextColor || 'black';
+              // colTextEntryText override via skin.textEntryText (baseline 'black').
+              const textColor = el.props.entryTextColor || skin.textEntryText;
               const isMulti = !!el.props.entryMultiline;
               const value = el.props.text || '';
               const placeholder = el.props.entryPlaceholderText || '';
@@ -512,8 +522,8 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
                   // Multi-line preview: bounded text area, top-aligned, wraps text.
                   return (
                       <div
-                          className="w-full h-full bg-white border border-neutral-400 shadow-inner overflow-hidden"
-                          style={{ borderRadius: commonStyle.borderRadius }}
+                          className="w-full h-full border border-neutral-400 shadow-inner overflow-hidden"
+                          style={{ borderRadius: commonStyle.borderRadius, backgroundColor: skin.textEntryBG }}
                       >
                           <div
                               style={{
@@ -524,7 +534,7 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
                                   overflowY: 'auto',
                                   fontFamily: commonStyle.fontFamily,
                                   fontSize: commonStyle.fontSize,
-                                  color: showPlaceholder ? '#999' : textColor,
+                                  color: showPlaceholder ? skin.textEntryPlaceholder : textColor,
                               }}
                           >
                               {showPlaceholder ? placeholder : (value || ' ')}
@@ -535,9 +545,9 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
 
               // Single-line (existing behavior + placeholder + textColor)
               return (
-                  <div className="w-full h-full bg-white border border-neutral-400 flex items-center px-1.5 shadow-inner" style={{borderRadius: commonStyle.borderRadius}}>
+                  <div className="w-full h-full border border-neutral-400 flex items-center px-1.5 shadow-inner" style={{borderRadius: commonStyle.borderRadius, backgroundColor: skin.textEntryBG}}>
                       {showPlaceholder ? (
-                          <span className={`${baseText} truncate w-full`} style={{ color: '#999', fontFamily: commonStyle.fontFamily, fontSize: commonStyle.fontSize }}>{placeholder}</span>
+                          <span className={`${baseText} truncate w-full`} style={{ color: skin.textEntryPlaceholder, fontFamily: commonStyle.fontFamily, fontSize: commonStyle.fontSize }}>{placeholder}</span>
                       ) : (
                           editableText(el, value, `${baseText} truncate w-full`, {...commonStyle, backgroundColor: 'transparent', borderWidth: 0, color: textColor})
                       )}
@@ -562,8 +572,10 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
                // readable color from the parent's effective background. Falls
                // back to white only if there's no parent at all.
                {
-                   const parentBg = getEffectiveParentBg(el, state.elements);
+                   const parentBg = getEffectiveParentBg(el, state.elements, skin);
+                   // Priority: per-element color > skin text_normal override > readable-from-parent.
                    const labelColor = el.props.labelTextColor
+                       ?? skin.labelText
                        ?? (parentBg ? getReadableTextColor(parentBg) : '#ffffff');
                    const labelStyle: React.CSSProperties = {
                        ...commonStyle,
@@ -611,7 +623,7 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
               
           case ComponentType.DForm:
               return (
-                  <div className="w-full h-full bg-white flex flex-col border border-neutral-400 rounded-sm" style={commonStyle}>
+                  <div className="w-full h-full flex flex-col border border-neutral-400 rounded-sm" style={{ ...commonStyle, backgroundColor: bgColor || skin.form }}>
                        <div className="bg-neutral-200 border-b border-neutral-300 px-2 py-1">
                            {editableText(el, el.props.text || 'Form', 'text-black text-[10px] font-bold', { color: 'black' })}
                        </div>
@@ -631,7 +643,7 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
                     className="w-full h-full"
                     style={{
                       ...commonStyle,
-                      backgroundColor: paintBg ? (bgColor || SKIN_DEFAULTS.panel) : 'transparent',
+                      backgroundColor: paintBg ? (bgColor || skin.panel) : 'transparent',
                       border: paintBg
                           ? (el.props.borderWidth ? commonStyle.border : '1px solid rgba(0,0,0,0.3)')
                           : '1px dashed rgba(255,255,255,0.15)',
@@ -647,7 +659,7 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
               return (
                   <div
                     className="w-full h-full border border-black/30"
-                    style={{ ...commonStyle, backgroundColor: bgColor || SKIN_DEFAULTS.panel }}
+                    style={{ ...commonStyle, backgroundColor: bgColor || skin.panel }}
                   >
                   </div>
               );
@@ -710,7 +722,14 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
                       {/* Rows */}
                       <div className="flex-1 bg-white flex flex-col overflow-y-auto">
                           {rows.map((row, ri) => (
-                              <div key={ri} className={`flex h-4 hover:bg-[#3399FF] hover:text-white text-black ${ri % 2 === 1 ? 'bg-[#f5f5f5]' : ''}`}>
+                              // listview_hover / listview_selected are skin-driven; applied on
+                              // hover via inline style (baseline #3399FF == prior hover:bg class).
+                              <div
+                                key={ri}
+                                className={`flex h-4 text-black ${ri % 2 === 1 ? 'bg-[#f5f5f5]' : ''}`}
+                                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = skin.listViewHover; e.currentTarget.style.color = '#fff'; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = ''; e.currentTarget.style.color = ''; }}
+                              >
                                   {cols.map((_, ci) => (
                                       <div key={ci} className="flex-1 px-1 flex items-center truncate text-[10px]">{row[ci] ?? ''}</div>
                                   ))}
@@ -729,7 +748,7 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
                     className="w-full h-full"
                     style={{
                       ...commonStyle,
-                      backgroundColor: bgColor || '#2a2a2a',
+                      backgroundColor: bgColor || skin.bevel,
                       boxShadow: 'inset 1px 1px 0 rgba(0,0,0,0.6), inset -1px -1px 0 rgba(255,255,255,0.06)',
                     }}
                   />
@@ -1370,12 +1389,21 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
                   </div>
               );
 
-          default:
+          default: {
+              // Runtime-imported panels render as default-skin replicas
+              // (see DynamicPanelRenderer); anything unknown keeps the
+              // generic placeholder.
+              const dynDef = getDynamicPanel(el.type);
+              if (dynDef) {
+                  const replica = renderDynamicPanel(el, dynDef, commonStyle, skin);
+                  if (replica) return replica;
+              }
               return (
                   <div className="w-full h-full bg-[#2a2a2a] border border-dashed border-neutral-600 flex items-center justify-center" style={{opacity: commonStyle.opacity}}>
                       <span className="text-[10px] text-neutral-500 font-mono">{el.type}</span>
                   </div>
               );
+          }
       }
   };
 

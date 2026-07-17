@@ -11,6 +11,7 @@
 **ALL CHUNKS CLOSED.** Every non-deferred element is at 🟢. KB is in maintenance mode.
 
 Future work would be:
+- **Upstream removals (found 2026-07-14):** DBevel, DRichText, DSysButton no longer exist in GMod — no wiki page and no file in Facepunch/garrysmod. Our implementations targeted docs that have since been deleted. Decide whether to keep them as legacy types or remove. They show with a "removed from wiki" badge in File > Import VGUI Panel.
 - DHorizontalDivider (sister of DVerticalDivider — would mostly mirror chunk 2)
 - Per-element fidelity refinements as users surface in-game vs preview discrepancies
 - `luaParser.ts` round-trip support for the new props (currently parser only restores well-known fields)

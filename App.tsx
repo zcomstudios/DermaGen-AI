@@ -8,7 +8,11 @@ import MenuBar from './components/MenuBar';
 import MethodsMenu from './components/MethodsMenu';
 import TreeGraphPanel from './components/TreeGraphPanel';
 import AboutModal from './components/AboutModal';
+import ImportVguiModal from './components/ImportVguiModal';
+import SkinEditorDrawer from './components/SkinEditorDrawer';
 import { generateLuaCode } from './utils/luaGenerator';
+import { getDynamicPanel } from './utils/dynamicPanelRegistry';
+import { useActiveSkin } from './utils/skinRegistry';
 import { parseLuaToState } from './utils/luaParser';
 import { generateLayoutFromPrompt } from './services/gemini';
 import { Copy, Terminal, Undo2, Redo2, Grid, ChevronDown, ChevronUp, ScrollText } from 'lucide-react';
@@ -44,12 +48,17 @@ const App: React.FC = () => {
   const [historyIndex, setHistoryIndex] = useState(0);
   const currentState = history[historyIndex];
 
+  // Active custom skin (or null). Drives the root SetSkin(...) line in the export.
+  const activeSkin = useActiveSkin();
+
   const [viewState, setViewState] = useState<ViewState>(initialViewState);
   const [generatedCode, setGeneratedCode] = useState<string>('');
   const [isGeneratingAI, setIsGeneratingAI] = useState(false);
   const [isOutputCollapsed, setIsOutputCollapsed] = useState(false);
   const [isMethodsMenuOpen, setIsMethodsMenuOpen] = useState(false);
   const [isAboutOpen, setIsAboutOpen] = useState(false);
+  const [isVguiListOpen, setIsVguiListOpen] = useState(false);
+  const [isSkinEditorOpen, setIsSkinEditorOpen] = useState(false);
   const [currentFileName, setCurrentFileName] = useState<string>("project.json");
 
   // Hidden inputs for file operations
@@ -71,8 +80,8 @@ const App: React.FC = () => {
 
   useEffect(() => {
     localStorage.setItem('dermaGenState', JSON.stringify(currentState));
-    setGeneratedCode(generateLuaCode(currentState));
-  }, [currentState]);
+    setGeneratedCode(generateLuaCode(currentState, { skinName: activeSkin?.name }));
+  }, [currentState, activeSkin]);
 
   const pushState = useCallback((newState: EditorState) => {
     setHistory(prev => {
@@ -183,7 +192,10 @@ const App: React.FC = () => {
 
   // --- STATE MODIFIERS ---
 
-  const addComponent = (type: ComponentType) => {
+  const addComponent = (rawType: ComponentType | string) => {
+    // Runtime-imported panels arrive as plain strings; UIElement.type is a
+    // string enum so the cast is safe at runtime.
+    const type = rawType as ComponentType;
     if (!currentState.rootId && type !== ComponentType.DFrame) {
       alert("You must add a DFrame first.");
       return;
@@ -195,9 +207,11 @@ const App: React.FC = () => {
 
     const id = Math.random().toString(36).substr(2, 9);
     const parentId = currentState.selectedId || currentState.rootId;
-    
+
     // Default sizes for different types
     let w = 100, h = 30;
+    const dynDef = getDynamicPanel(type);
+    if (dynDef) { w = dynDef.defaultSize.w; h = dynDef.defaultSize.h; }
     if (type === ComponentType.DFrame) { w = 600; h = 400; }
     else if (type === ComponentType.DPanel) { w = 200; h = 200; }
     else if (type === ComponentType.DCheckBox) { w = 100; h = 20; }
@@ -770,7 +784,9 @@ const App: React.FC = () => {
         onSave={handleSave}
         onSaveAs={handleSaveAs}
         onImport={handleImportClick}
+        onImportVguiPanels={() => setIsVguiListOpen(true)}
         onExport={handleExport}
+        onOpenSkinEditor={() => setIsSkinEditorOpen(true)}
         onUndo={undo}
         onRedo={redo}
         onDelete={() => currentState.selectedIds.length > 0 && deleteMany(currentState.selectedIds)}
@@ -929,6 +945,16 @@ const App: React.FC = () => {
       <AboutModal
         isOpen={isAboutOpen}
         onClose={() => setIsAboutOpen(false)}
+      />
+
+      <ImportVguiModal
+        isOpen={isVguiListOpen}
+        onClose={() => setIsVguiListOpen(false)}
+      />
+
+      <SkinEditorDrawer
+        isOpen={isSkinEditorOpen}
+        onClose={() => setIsSkinEditorOpen(false)}
       />
     </div>
   );
