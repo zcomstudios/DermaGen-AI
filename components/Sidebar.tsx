@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { ComponentType } from '../types';
-import { LayoutTemplate, Square, Type, MousePointer2, CheckSquare, SquareAsterisk, Box, Search, List, Table, Image as ImageIcon, Layers, ChevronDown, Folder, FormInput, Cuboid, LayoutGrid, GitMerge, Sliders, SquareChevronDown, SplitSquareVertical, SplitSquareHorizontal, Bell, Link, ExternalLink, Menu, Scroll, Columns, Book, Github } from 'lucide-react';
+import { LayoutTemplate, Square, Type, MousePointer2, CheckSquare, SquareAsterisk, Box, Search, List, Table, Image as ImageIcon, Layers, ChevronDown, Folder, FormInput, Cuboid, LayoutGrid, GitMerge, Sliders, SquareChevronDown, SplitSquareVertical, SplitSquareHorizontal, Bell, Link, ExternalLink, Menu, Scroll, Columns, Book, Github, PackagePlus } from 'lucide-react';
+import { useDynamicPanels } from '../utils/dynamicPanelRegistry';
 
 interface SidebarProps {
-  onAddComponent: (type: ComponentType) => void;
+  onAddComponent: (type: ComponentType | string) => void;
 }
 
 const WIKI_BASE = "https://wiki.facepunch.com/gmod/";
@@ -53,8 +54,9 @@ const COMPONENT_INFO: Record<ComponentType, { desc: string, icon: any, wiki: str
 
 const Sidebar: React.FC<SidebarProps> = ({ onAddComponent }) => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [hoveredType, setHoveredType] = useState<ComponentType | null>(null);
-  const [contextMenu, setContextMenu] = useState<{ x: number, y: number, type: ComponentType } | null>(null);
+  const [hoveredType, setHoveredType] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number, y: number, type: string } | null>(null);
+  const dynamicPanels = useDynamicPanels();
 
   useEffect(() => {
     const handleClick = () => setContextMenu(null);
@@ -62,15 +64,39 @@ const Sidebar: React.FC<SidebarProps> = ({ onAddComponent }) => {
     return () => document.removeEventListener('click', handleClick);
   }, []);
 
+  const builtinTypes = useMemo(() => new Set<string>(Object.values(ComponentType)), []);
+
   const filteredComponents = useMemo(() => {
-    return Object.values(ComponentType).filter(type => 
-      type.toLowerCase().includes(searchTerm.toLowerCase())
-    );
-  }, [searchTerm]);
+    const q = searchTerm.toLowerCase();
+    const builtin = Object.values(ComponentType).filter(type =>
+      type.toLowerCase().includes(q)
+    ) as string[];
+    // Runtime-imported panels appear after the built-ins (skip name collisions).
+    const dynamic = dynamicPanels
+      .map(p => p.name)
+      .filter(name => !builtinTypes.has(name) && name.toLowerCase().includes(q));
+    return [...builtin, ...dynamic];
+  }, [searchTerm, dynamicPanels, builtinTypes]);
 
-  const activeInfo = hoveredType ? COMPONENT_INFO[hoveredType] : null;
+  // Resolve display info for both built-in and runtime-imported components.
+  const getInfo = (type: string): { desc: string, icon: any, wiki: string, dynamic: boolean } | null => {
+    const builtin = COMPONENT_INFO[type as ComponentType];
+    if (builtin) return { ...builtin, dynamic: false };
+    const def = dynamicPanels.find(p => p.name === type);
+    if (def) {
+      return {
+        desc: def.description + (def.parent ? ` (derives from ${def.parent})` : ''),
+        icon: PackagePlus,
+        wiki: def.name,
+        dynamic: true,
+      };
+    }
+    return null;
+  };
 
-  const handleContextMenu = (e: React.MouseEvent, type: ComponentType) => {
+  const activeInfo = hoveredType ? getInfo(hoveredType) : null;
+
+  const handleContextMenu = (e: React.MouseEvent, type: string) => {
       e.preventDefault();
       setContextMenu({
           x: e.clientX,
@@ -79,12 +105,16 @@ const Sidebar: React.FC<SidebarProps> = ({ onAddComponent }) => {
       });
   };
 
-  const openWiki = (type: ComponentType) => {
-      const info = COMPONENT_INFO[type];
+  const openWiki = (type: string) => {
+      const def = dynamicPanels.find(p => p.name === type);
+      if (def) { window.open(def.wikiUrl, '_blank'); return; }
+      const info = COMPONENT_INFO[type as ComponentType];
       if (info) window.open(`${WIKI_BASE}${info.wiki}`, '_blank');
   };
 
-  const openGithub = (type: ComponentType) => {
+  const openGithub = (type: string) => {
+      const def = dynamicPanels.find(p => p.name === type);
+      if (def?.githubUrl) { window.open(def.githubUrl, '_blank'); return; }
       // Heuristic: most Lua VGUI files are lowercase named matching the component name
       const filename = `${type.toLowerCase()}.lua`;
       window.open(`${GITHUB_BASE}${filename}`, '_blank');
@@ -108,7 +138,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onAddComponent }) => {
       
       <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
         {filteredComponents.map((type) => {
-          const info = COMPONENT_INFO[type];
+          const info = getInfo(type);
           const Icon = info?.icon || Box;
 
           return (
@@ -123,11 +153,19 @@ const Sidebar: React.FC<SidebarProps> = ({ onAddComponent }) => {
               <div className="p-1.5 bg-neutral-800 rounded mr-3 group-hover:bg-neutral-700 text-neutral-400 group-hover:text-blue-400 transition-colors">
                 <Icon className="w-4 h-4" />
               </div>
-              <div className="flex flex-col overflow-hidden">
+              <div className="flex flex-col overflow-hidden flex-1">
                   <span className="text-sm font-medium text-neutral-300 group-hover:text-white truncate">
                     {type}
                   </span>
               </div>
+              {info?.dynamic && (
+                <span
+                  className="ml-1 px-1 py-0.5 rounded text-[9px] bg-green-500/15 text-green-400 border border-green-500/30 shrink-0"
+                  title="Imported at runtime from the GitHub source + GMod wiki"
+                >
+                  imported
+                </span>
+              )}
             </button>
           );
         })}

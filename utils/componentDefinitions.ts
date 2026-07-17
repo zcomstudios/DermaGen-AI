@@ -1,4 +1,5 @@
 import { ComponentType } from "../types";
+import { getDynamicPanel } from "./dynamicPanelRegistry";
 
 export interface MethodSignature {
   name: string;
@@ -69,9 +70,18 @@ const COMPONENT_METHODS: Partial<Record<ComponentType, MethodSignature[]>> = {
   ],
 };
 
-export const getMethodsForComponent = (type: ComponentType): MethodSignature[] => {
-  const specific = COMPONENT_METHODS[type] || [];
-  return [...specific, ...COMMON_PANEL_METHODS].sort((a, b) => a.name.localeCompare(b.name));
+export const getMethodsForComponent = (type: ComponentType | string): MethodSignature[] => {
+  const specific = COMPONENT_METHODS[type as ComponentType] || [];
+  // Runtime-imported panels contribute the methods parsed from their GitHub
+  // source / wiki page; dedupe by name (imported signatures win).
+  const dynamic = (getDynamicPanel(type)?.methods || []).map((m) => ({
+    name: m.name,
+    args: m.args,
+    description: m.description || `Imported from ${m.source === 'github' ? 'the GitHub Lua source' : 'the GMod wiki'}.`,
+  }));
+  const seen = new Set(dynamic.map((m) => m.name));
+  const rest = [...specific, ...COMMON_PANEL_METHODS].filter((m) => !seen.has(m.name));
+  return [...dynamic, ...rest].sort((a, b) => a.name.localeCompare(b.name));
 };
 
 const WIKI_BASE = 'https://wiki.facepunch.com/gmod/';
@@ -117,7 +127,8 @@ const WIKI_SLUGS: Partial<Record<ComponentType, string>> = {
   [ComponentType.DColumnSheet]: 'DColumnSheet',
 };
 
-export const getGmodWikiUrl = (type: ComponentType): string | null => {
-  const slug = WIKI_SLUGS[type];
-  return slug ? `${WIKI_BASE}${slug}` : null;
+export const getGmodWikiUrl = (type: ComponentType | string): string | null => {
+  const slug = WIKI_SLUGS[type as ComponentType];
+  if (slug) return `${WIKI_BASE}${slug}`;
+  return getDynamicPanel(type)?.wikiUrl || null;
 };

@@ -207,6 +207,10 @@ export interface ComponentProps {
   // Editor-only flag — locked elements can't be moved/resized/deleted
   locked?: boolean;
 
+  // Values for properties discovered on runtime-imported panels
+  // (AccessorFunc Get/Set pairs parsed from the GitHub source).
+  customProps?: Record<string, string | number | boolean>;
+
   // Logic
   methods?: Record<string, string>; // methodName -> code body
 }

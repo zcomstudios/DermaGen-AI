@@ -8,6 +8,15 @@ export default defineConfig(({ mode }) => {
       server: {
         port: 3000,
         host: '0.0.0.0',
+        proxy: {
+          // wiki.facepunch.com sends no CORS headers, so the VGUI importer
+          // fetches wiki pages through the dev server instead.
+          '/gmodwiki': {
+            target: 'https://wiki.facepunch.com',
+            changeOrigin: true,
+            rewrite: (p) => p.replace(/^\/gmodwiki/, '/gmod'),
+          },
+        },
       },
       plugins: [react()],
       define: {

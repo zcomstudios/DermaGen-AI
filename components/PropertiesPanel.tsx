@@ -1,6 +1,7 @@
 import React from 'react';
 import { UIElement, ComponentType } from '../types';
-import { Hash, Type, Layout, Palette, CheckCircle, Trash2, Settings2, AlignLeft, AlignCenter, AlignRight, MousePointer, Info, FolderTree, Sparkles, Image as ImageIcon, Layers, Move, Wand2, Box, Eye, LayoutTemplate } from 'lucide-react';
+import { Hash, Type, Layout, Palette, CheckCircle, Trash2, Settings2, AlignLeft, AlignCenter, AlignRight, MousePointer, Info, FolderTree, Sparkles, Image as ImageIcon, Layers, Move, Wand2, Box, Eye, LayoutTemplate, PackagePlus } from 'lucide-react';
+import { getDynamicPanel } from '../utils/dynamicPanelRegistry';
 
 interface PropertiesPanelProps {
   selectedElement: UIElement | null;
@@ -189,7 +190,68 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({ selectedElement, allE
             </div>
           </div>
         </Section>
-        
+
+        {/* Properties parsed from a runtime-imported panel's GitHub source */}
+        {(() => {
+          const dynDef = getDynamicPanel(type);
+          if (!dynDef || dynDef.properties.length === 0) return null;
+          const customProps = props.customProps || {};
+          const setCustom = (name: string, value: string | number | boolean | undefined) => {
+            const next = { ...customProps };
+            if (value === undefined || value === '') delete next[name];
+            else next[name] = value;
+            onChange(id, { customProps: next });
+          };
+          return (
+            <Section title="Imported Properties" icon={PackagePlus}>
+              <p className="text-[10px] text-neutral-500 -mt-1">
+                From {dynDef.name}'s AccessorFunc definitions — set values emit{' '}
+                <code className="text-neutral-400">Set*</code> calls in the Lua output.
+              </p>
+              {dynDef.properties.map((p) => {
+                const val = customProps[p.name];
+                return (
+                  <div key={p.name}>
+                    {p.luaType === 'bool' ? (
+                      <label className="flex items-center gap-2 text-xs text-neutral-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={val === true}
+                          onChange={(e) => setCustom(p.name, e.target.checked ? true : undefined)}
+                          className="w-3.5 h-3.5 accent-blue-500"
+                        />
+                        {p.name}
+                        <span className="text-[9px] text-neutral-600 font-mono">{p.setter}</span>
+                      </label>
+                    ) : (
+                      <>
+                        <label className="block text-[10px] text-neutral-400 mb-1">
+                          {p.name}{' '}
+                          <span className="text-[9px] text-neutral-600 font-mono">
+                            {p.setter} · {p.luaType}
+                          </span>
+                        </label>
+                        <input
+                          type={p.luaType === 'number' ? 'number' : 'text'}
+                          value={val === undefined ? '' : String(val)}
+                          placeholder="(not set)"
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            if (raw === '') setCustom(p.name, undefined);
+                            else if (p.luaType === 'number') setCustom(p.name, parseFloat(raw) || 0);
+                            else setCustom(p.name, raw);
+                          }}
+                          className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-xs text-white focus:border-blue-500 focus:outline-none"
+                        />
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </Section>
+          );
+        })()}
+
         {/* Structure Section for Parenting */}
         {type !== ComponentType.DFrame && (
             <Section title="Hierarchy" icon={FolderTree}>
