@@ -6,7 +6,11 @@ import { useActiveEffectiveSkin } from '../utils/skinResolver';
 import { getGmodWikiUrl } from '../utils/componentDefinitions';
 import { getDynamicPanel } from '../utils/dynamicPanelRegistry';
 import { renderDynamicPanel } from './DynamicPanelRenderer';
-import { ZoomIn, ZoomOut, Grid as GridIcon, ImageOff, Cuboid, X, Lock, LockOpen, Maximize2, Globe, Trash2, Settings2, Group, Ungroup, Minimize2, Link as LinkIcon, Unlink, ChevronRight, Copy as CopyIcon, Check, Square, Type as TypeIcon } from 'lucide-react';
+import CanvasRulers from './CanvasRulers';
+import { computeSnap } from '../utils/canvasSnapping';
+import { ZoomIn, ZoomOut, Grid as GridIcon, ImageOff, Cuboid, X, Lock, LockOpen, Maximize2, Globe, Trash2, Settings2, Group, Ungroup, Minimize2, Link as LinkIcon, Unlink, ChevronRight, Copy as CopyIcon, Check, Square, Type as TypeIcon, Ruler, Magnet, Eraser } from 'lucide-react';
+
+const RULER_SIZE = 24; // px band width for the top/left rulers
 
 // Component types whose visible text can be edited inline by double-clicking.
 const TEXT_EDITABLE_TYPES = new Set<ComponentType>([
@@ -64,10 +68,153 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
   // Context menu: when non-null, an absolutely-positioned menu is shown.
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; elementId: string; submenu: 'parent' | null } | null>(null);
 
+  // ── Rulers + guides + snapping ────────────────────────────────────────────
+  // Normalized ViewState reads (optional fields default here so old saved state
+  // stays valid).
+  const showRulers = viewState.showRulers !== false;   // default true
+  const snapToGuides = viewState.snapToGuides !== false; // default true
+  const guidesV = viewState.guidesV ?? [];             // vertical guides (x positions)
+  const guidesH = viewState.guidesH ?? [];             // horizontal guides (y positions)
+
+  // Live viewport pixel size (for positioning rulers/guides in screen space).
+  const [viewportSize, setViewportSize] = useState({ w: 0, h: 0 });
+  // Which guide (if any) the current drag is snapped to, per axis — drives the
+  // highlighted snap-line feedback. Cleared on mouseup.
+  const [activeSnapGuides, setActiveSnapGuides] = useState<{ v: number | null; h: number | null }>({ v: null, h: null });
+  // Active guide create/move drag. `pos` is the live canvas coordinate;
+  // `remove` marks that releasing now would delete/cancel it.
+  const [guideDrag, setGuideDrag] = useState<
+    { axis: 'v' | 'h'; mode: 'create' | 'move'; index: number; pos: number; remove: boolean } | null
+  >(null);
+
   const snap = (val: number) => {
       if (!viewState.showGrid) return val;
       const s = viewState.gridSize;
       return Math.round(val / s) * s;
+  };
+
+  // Where a parent's children coordinate origin (0,0) actually renders, relative
+  // to the parent's own top-left. Most parents fill edge-to-edge (0,0); sheet /
+  // form containers offset their children below/right of their chrome (mirrors
+  // childrenContainerStyle in renderElement).
+  const childOriginOffset = (parent: UIElement): { x: number; y: number } => {
+    switch (parent.type) {
+      case ComponentType.DPropertySheet: return { x: 4, y: 24 };
+      case ComponentType.DColumnSheet:   return { x: 84, y: 4 };
+      case ComponentType.DForm:          return { x: 4, y: 24 };
+      default:                           return { x: 0, y: 0 };
+    }
+  };
+
+  // Absolute position of an element's top-left in ROOT canvas space, matching
+  // where it actually renders (screen = pos*zoom + pan). Unlike
+  // getAbsoluteCanvasPos this DOES fold in each ancestor's child-origin chrome
+  // offset, so guide snapping stays accurate for nested children.
+  const getAbsoluteRenderPos = (id: string): { x: number; y: number } => {
+    const el = state.elements[id];
+    if (!el) return { x: 0, y: 0 };
+    if (!el.parentId) return { x: el.props.x, y: el.props.y };
+    const parent = state.elements[el.parentId];
+    const p = getAbsoluteRenderPos(el.parentId);
+    const off = parent ? childOriginOffset(parent) : { x: 0, y: 0 };
+    return { x: p.x + off.x + el.props.x, y: p.y + off.y + el.props.y };
+  };
+
+  // Snap targets per axis: user guides plus the root frame's outer edges.
+  const buildSnapTargets = (): { v: number[]; h: number[] } => {
+    const v = [...guidesV];
+    const h = [...guidesH];
+    if (state.rootId) {
+      const f = state.elements[state.rootId];
+      if (f) {
+        v.push(f.props.x, f.props.x + f.props.w);
+        h.push(f.props.y, f.props.y + f.props.h);
+      }
+    }
+    return { v, h };
+  };
+
+  // ── Guide create/move drag (shared by ruler pull-out and existing-guide drag) ─
+  const deleteGuide = (axis: 'v' | 'h', index: number) => {
+    if (axis === 'v') onViewChange({ ...viewState, guidesV: guidesV.filter((_, i) => i !== index) });
+    else onViewChange({ ...viewState, guidesH: guidesH.filter((_, i) => i !== index) });
+  };
+
+  const clearGuides = () => onViewChange({ ...viewState, guidesV: [], guidesH: [] });
+
+  const beginGuideDrag = (
+    opts: { axis: 'v' | 'h'; mode: 'create' | 'move'; index: number },
+    startClientX: number,
+    startClientY: number,
+  ) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const zoom = viewState.zoom, panX = viewState.panX, panY = viewState.panY;
+
+    // Screen (containerRef-relative) → live canvas coordinate for this axis.
+    const compute = (clientX: number, clientY: number) => {
+      const sx = clientX - rect.left;
+      const sy = clientY - rect.top;
+      const pos = opts.axis === 'v' ? (sx - panX) / zoom : (sy - panY) / zoom;
+      return { sx, sy, pos };
+    };
+    // Would releasing at (sx,sy) delete/cancel the guide? (dropped on its source
+    // ruler band, or dragged out of the viewport on its axis).
+    const wouldRemove = (sx: number, sy: number) =>
+      opts.axis === 'v' ? (sx < RULER_SIZE || sx > rect.width) : (sy < RULER_SIZE || sy > rect.height);
+
+    const roundPos = (pos: number, shift: boolean) => {
+      let p = pos;
+      if (shift && viewState.gridSize > 0) p = Math.round(p / viewState.gridSize) * viewState.gridSize;
+      return Math.round(p);
+    };
+
+    {
+      const { sx, sy, pos } = compute(startClientX, startClientY);
+      setGuideDrag({ axis: opts.axis, mode: opts.mode, index: opts.index, pos: roundPos(pos, false), remove: wouldRemove(sx, sy) });
+    }
+
+    const onMove = (ev: MouseEvent) => {
+      const { sx, sy, pos } = compute(ev.clientX, ev.clientY);
+      setGuideDrag({ axis: opts.axis, mode: opts.mode, index: opts.index, pos: roundPos(pos, ev.shiftKey), remove: wouldRemove(sx, sy) });
+    };
+
+    const onUp = (ev: MouseEvent) => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      const { sx, sy, pos } = compute(ev.clientX, ev.clientY);
+      const p = roundPos(pos, ev.shiftKey);
+      const remove = wouldRemove(sx, sy);
+
+      if (opts.mode === 'create') {
+        if (!remove) {
+          if (opts.axis === 'v') onViewChange({ ...viewState, guidesV: [...guidesV, p] });
+          else onViewChange({ ...viewState, guidesH: [...guidesH, p] });
+        }
+        // else: released over the source ruler / outside — cancel (add nothing)
+      } else {
+        if (remove) {
+          deleteGuide(opts.axis, opts.index);
+        } else if (opts.axis === 'v') {
+          const nv = [...guidesV]; nv[opts.index] = p; onViewChange({ ...viewState, guidesV: nv });
+        } else {
+          const nh = [...guidesH]; nh[opts.index] = p; onViewChange({ ...viewState, guidesH: nh });
+        }
+      }
+      setGuideDrag(null);
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  // Mousedown on a ruler band pulls a NEW guide out (Photoshop: top ruler →
+  // horizontal guide, left ruler → vertical guide).
+  const handleStartGuideFromRuler = (ruler: 'top' | 'left', e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    beginGuideDrag({ axis: ruler === 'top' ? 'h' : 'v', mode: 'create', index: -1 }, e.clientX, e.clientY);
   };
 
   // An element is effectively locked if it OR any ancestor has props.locked === true.
@@ -244,6 +391,17 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
     };
   }, [isPanning, lastMousePos, viewState, onViewChange]);
 
+  // Track the viewport pixel size so rulers/guides can position in screen space.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => setViewportSize({ w: el.clientWidth, h: el.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const renderResizeHandles = (el: UIElement) => {
       // Don't show handles if element is in an auto-layout container
       const parent = el.parentId ? state.elements[el.parentId] : null;
@@ -260,10 +418,21 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
           const startY = e.clientY;
           const startProps = { ...el.props };
 
+          // Absolute-space origin of this element's PARENT content area, so we can
+          // express the dragged edge in root canvas space (where guides live).
+          const parentEl = el.parentId ? state.elements[el.parentId] : null;
+          const parentAbs = (() => {
+            if (!parentEl || !el.parentId) return { x: 0, y: 0 };
+            const pp = getAbsoluteRenderPos(el.parentId);
+            const off = childOriginOffset(parentEl);
+            return { x: pp.x + off.x, y: pp.y + off.y };
+          })();
+          const targets = buildSnapTargets();
+
           const handleResizeMove = (moveEvent: MouseEvent) => {
               const dx = (moveEvent.clientX - startX) / viewState.zoom;
               const dy = (moveEvent.clientY - startY) / viewState.zoom;
-              
+
               const newProps = { ...startProps };
 
               if (dir.includes('e')) newProps.w = Math.max(10, startProps.w + dx);
@@ -279,15 +448,48 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
                   newProps.h = startProps.h - delta;
               }
 
-              newProps.x = snap(newProps.x);
-              newProps.y = snap(newProps.y);
-              newProps.w = snap(newProps.w);
-              newProps.h = snap(newProps.h);
+              // Guide snapping on the dragged edge(s), in absolute space. Guide
+              // snap takes priority over grid snap per axis; ungated axes keep
+              // the original grid-snap behavior.
+              let guideX = false, guideY = false;
+              let activeV: number | null = null, activeH: number | null = null;
+              if (snapToGuides) {
+                  const thr = 6 / viewState.zoom;
+                  if (dir.includes('e')) {
+                      const s = computeSnap([parentAbs.x + newProps.x + newProps.w], targets.v, thr);
+                      if (s) { newProps.w = Math.max(10, newProps.w + s.delta); guideX = true; activeV = s.target; }
+                  } else if (dir.includes('w')) {
+                      const s = computeSnap([parentAbs.x + newProps.x], targets.v, thr);
+                      if (s) {
+                          const rightRel = newProps.x + newProps.w; // keep right edge fixed
+                          newProps.x = newProps.x + s.delta;
+                          newProps.w = Math.max(10, rightRel - newProps.x);
+                          guideX = true; activeV = s.target;
+                      }
+                  }
+                  if (dir.includes('s')) {
+                      const s = computeSnap([parentAbs.y + newProps.y + newProps.h], targets.h, thr);
+                      if (s) { newProps.h = Math.max(10, newProps.h + s.delta); guideY = true; activeH = s.target; }
+                  } else if (dir.includes('n')) {
+                      const s = computeSnap([parentAbs.y + newProps.y], targets.h, thr);
+                      if (s) {
+                          const botRel = newProps.y + newProps.h; // keep bottom edge fixed
+                          newProps.y = newProps.y + s.delta;
+                          newProps.h = Math.max(10, botRel - newProps.y);
+                          guideY = true; activeH = s.target;
+                      }
+                  }
+              }
+
+              if (!guideX) { newProps.x = snap(newProps.x); newProps.w = snap(newProps.w); }
+              if (!guideY) { newProps.y = snap(newProps.y); newProps.h = snap(newProps.h); }
+              setActiveSnapGuides({ v: activeV, h: activeH });
 
               onUpdateElement(el.id, newProps);
           };
 
           const handleResizeUp = () => {
+              setActiveSnapGuides({ v: null, h: null });
               document.removeEventListener('mousemove', handleResizeMove);
               document.removeEventListener('mouseup', handleResizeUp);
           };
@@ -1512,26 +1714,64 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
         startPositions.set(id, { x: el.props.x, y: el.props.y });
       }
 
+      // Absolute-space bounding box of the dragged element(s) at drag start, for
+      // guide snapping. Candidates per axis are the bbox's near/center/far edges.
+      let dragMinL = Infinity, dragMinT = Infinity, dragMaxR = -Infinity, dragMaxB = -Infinity;
+      for (const sid of startPositions.keys()) {
+        const sel = state.elements[sid];
+        if (!sel) continue;
+        const abs = getAbsoluteRenderPos(sid);
+        dragMinL = Math.min(dragMinL, abs.x);
+        dragMinT = Math.min(dragMinT, abs.y);
+        dragMaxR = Math.max(dragMaxR, abs.x + sel.props.w);
+        dragMaxB = Math.max(dragMaxB, abs.y + sel.props.h);
+      }
+      const dragCX = (dragMinL + dragMaxR) / 2;
+      const dragCY = (dragMinT + dragMaxB) / 2;
+      const moveTargets = buildSnapTargets();
+
       const handleMouseMove = (moveEvent: MouseEvent) => {
         const dx = (moveEvent.clientX - startX) / viewState.zoom;
         const dy = (moveEvent.clientY - startY) / viewState.zoom;
+
+        // Guide snapping: shift the whole drag so the bbox's nearest edge/center
+        // lands on a guide. Same adjusted delta applies to every element (pure
+        // translation → valid in parent-relative space too). Guide-snapped axes
+        // skip grid snap; other axes keep the original grid behavior.
+        let effDx = dx, effDy = dy;
+        let activeV: number | null = null, activeH: number | null = null;
+        if (snapToGuides && isFinite(dragMinL)) {
+          const thr = 6 / viewState.zoom;
+          const sx = computeSnap([dragMinL + dx, dragCX + dx, dragMaxR + dx], moveTargets.v, thr);
+          const sy = computeSnap([dragMinT + dy, dragCY + dy, dragMaxB + dy], moveTargets.h, thr);
+          if (sx) { effDx = dx + sx.delta; activeV = sx.target; }
+          if (sy) { effDy = dy + sy.delta; activeH = sy.target; }
+        }
+        setActiveSnapGuides({ v: activeV, h: activeH });
 
         // Atomic batch: build all patches, apply in ONE state write so each
         // element's update doesn't get overwritten by stale-state from the next.
         if (startPositions.size > 1 && onPatchMany) {
           const patches: Array<{ id: string; props: Partial<UIElement['props']> }> = [];
           for (const [sid, start] of startPositions) {
-            patches.push({ id: sid, props: { x: snap(start.x + dx), y: snap(start.y + dy) } });
+            patches.push({ id: sid, props: {
+              x: activeV !== null ? (start.x + effDx) : snap(start.x + dx),
+              y: activeH !== null ? (start.y + effDy) : snap(start.y + dy),
+            } });
           }
           onPatchMany(patches);
         } else {
           // Single-element drag — original codepath
           const start = startPositions.get(id);
-          if (start) onUpdateElement(id, { x: snap(start.x + dx), y: snap(start.y + dy) });
+          if (start) onUpdateElement(id, {
+            x: activeV !== null ? (start.x + effDx) : snap(start.x + dx),
+            y: activeH !== null ? (start.y + effDy) : snap(start.y + dy),
+          });
         }
       };
 
       const handleMouseUp = () => {
+        setActiveSnapGuides({ v: null, h: null });
         document.removeEventListener('mousemove', handleMouseMove);
         document.removeEventListener('mouseup', handleMouseUp);
       };
@@ -2226,15 +2466,36 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
         dir,
       };
 
+      // Guide snapping context (bounds.x/y are absolute canvas; px/py are props
+      // space — the difference is the props→absolute offset for this group).
+      const gTargets = buildSnapTargets();
+      const paX = bounds.x - bounds.px;
+      const paY = bounds.y - bounds.py;
+
       const handleMouseMove = (mv: MouseEvent) => {
         const drag = groupResizeDragRef.current;
         if (!drag) return;
         const { startBounds: sb, startElements: se, dir: d } = drag;
 
-        const rawDx = (mv.clientX - drag.startMouseX) / z;
-        const rawDy = (mv.clientY - drag.startMouseY) / z;
+        let rawDx = (mv.clientX - drag.startMouseX) / z;
+        let rawDy = (mv.clientY - drag.startMouseY) / z;
         const isShift = mv.shiftKey;
         const isAlt   = mv.altKey;
+
+        // Guide snapping on the dragged edge(s): nudge the raw drag delta so the
+        // dragged bounding-box edge lands on a guide. Guide-snapped axes then
+        // skip per-element grid snap (snapX/snapY below); ungated axes keep it.
+        let gActiveV: number | null = null, gActiveH: number | null = null;
+        if (snapToGuides) {
+          const thr = 6 / z;
+          if (d.includes('e')) { const s = computeSnap([paX + sb.px + sb.w + rawDx], gTargets.v, thr); if (s) { rawDx += s.delta; gActiveV = s.target; } }
+          else if (d.includes('w')) { const s = computeSnap([paX + sb.px + rawDx], gTargets.v, thr); if (s) { rawDx += s.delta; gActiveV = s.target; } }
+          if (d.includes('s')) { const s = computeSnap([paY + sb.py + sb.h + rawDy], gTargets.h, thr); if (s) { rawDy += s.delta; gActiveH = s.target; } }
+          else if (d.includes('n')) { const s = computeSnap([paY + sb.py + rawDy], gTargets.h, thr); if (s) { rawDy += s.delta; gActiveH = s.target; } }
+        }
+        setActiveSnapGuides({ v: gActiveV, h: gActiveH });
+        const snapX = (val: number) => gActiveV !== null ? val : snap(val);
+        const snapY = (val: number) => gActiveH !== null ? val : snap(val);
 
         // ── Step 1: compute new bounding box in props space ──────────────
         let newPx = sb.px, newPy = sb.py, newW = sb.w, newH = sb.h;
@@ -2267,10 +2528,10 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
             patches.push({
               id,
               props: {
-                x: snap(anchorPx + (start.x - anchorPx) * scaleX),
-                y: snap(anchorPy + (start.y - anchorPy) * scaleY),
-                w: snap(Math.max(10, start.w * scaleX)),
-                h: snap(Math.max(10, start.h * scaleY)),
+                x: snapX(anchorPx + (start.x - anchorPx) * scaleX),
+                y: snapY(anchorPy + (start.y - anchorPy) * scaleY),
+                w: snapX(Math.max(10, start.w * scaleX)),
+                h: snapY(Math.max(10, start.h * scaleY)),
               },
             });
           }
@@ -2279,15 +2540,15 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
           for (const [id, start] of se) {
             const p: Partial<UIElement['props']> = {};
             if (isAlt) {
-              if (d.includes('e')) { p.x = snap(start.x - rawDx); p.w = snap(Math.max(10, start.w + rawDx * 2)); }
-              if (d.includes('w')) { p.x = snap(start.x + rawDx); p.w = snap(Math.max(10, start.w - rawDx * 2)); }
-              if (d.includes('s')) { p.y = snap(start.y - rawDy); p.h = snap(Math.max(10, start.h + rawDy * 2)); }
-              if (d.includes('n')) { p.y = snap(start.y + rawDy); p.h = snap(Math.max(10, start.h - rawDy * 2)); }
+              if (d.includes('e')) { p.x = snapX(start.x - rawDx); p.w = snapX(Math.max(10, start.w + rawDx * 2)); }
+              if (d.includes('w')) { p.x = snapX(start.x + rawDx); p.w = snapX(Math.max(10, start.w - rawDx * 2)); }
+              if (d.includes('s')) { p.y = snapY(start.y - rawDy); p.h = snapY(Math.max(10, start.h + rawDy * 2)); }
+              if (d.includes('n')) { p.y = snapY(start.y + rawDy); p.h = snapY(Math.max(10, start.h - rawDy * 2)); }
             } else {
-              if (d.includes('e')) p.w = snap(Math.max(10, start.w + rawDx));
-              if (d.includes('s')) p.h = snap(Math.max(10, start.h + rawDy));
-              if (d.includes('w')) { const δ = Math.min(start.w - 10, rawDx); p.x = snap(start.x + δ); p.w = snap(start.w - δ); }
-              if (d.includes('n')) { const δ = Math.min(start.h - 10, rawDy); p.y = snap(start.y + δ); p.h = snap(start.h - δ); }
+              if (d.includes('e')) p.w = snapX(Math.max(10, start.w + rawDx));
+              if (d.includes('s')) p.h = snapY(Math.max(10, start.h + rawDy));
+              if (d.includes('w')) { const δ = Math.min(start.w - 10, rawDx); p.x = snapX(start.x + δ); p.w = snapX(start.w - δ); }
+              if (d.includes('n')) { const δ = Math.min(start.h - 10, rawDy); p.y = snapY(start.y + δ); p.h = snapY(start.h - δ); }
             }
             if (Object.keys(p).length) patches.push({ id, props: p });
           }
@@ -2298,6 +2559,7 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
 
       const handleMouseUp = () => {
         groupResizeDragRef.current = null;
+        setActiveSnapGuides({ v: null, h: null });
         document.removeEventListener('mousemove', handleMouseMove);
         document.removeEventListener('mouseup', handleMouseUp);
       };
@@ -2349,6 +2611,79 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
     );
   };
 
+  // Guides overlay — 1px cyan lines in screen space (canvasPos*zoom + pan),
+  // with an invisible 7px hit strip for dragging. The guide being moved is
+  // hidden here and re-drawn live from `guideDrag`.
+  const renderGuidesOverlay = () => {
+    const { zoom, panX, panY } = viewState;
+    const guideBase = 'rgba(34,211,238,0.8)'; // #22d3ee @ 80%
+    const guideActive = '#f0abfc';            // snap highlight
+    const nodes: React.ReactNode[] = [];
+
+    guidesV.forEach((gx, i) => {
+      if (guideDrag && guideDrag.mode === 'move' && guideDrag.axis === 'v' && guideDrag.index === i) return;
+      const left = gx * zoom + panX;
+      const hi = activeSnapGuides.v === gx;
+      nodes.push(
+        <React.Fragment key={'gv' + i}>
+          <div style={{ position: 'absolute', left, top: 0, width: hi ? 2 : 1, height: '100%', background: hi ? guideActive : guideBase, pointerEvents: 'none' }} />
+          <div
+            style={{ position: 'absolute', left: left - 3.5, top: 0, width: 7, height: '100%', pointerEvents: 'auto', cursor: 'ew-resize' }}
+            onMouseDown={(e) => { if (e.button !== 0) return; e.preventDefault(); e.stopPropagation(); beginGuideDrag({ axis: 'v', mode: 'move', index: i }, e.clientX, e.clientY); }}
+            onDoubleClick={(e) => { e.stopPropagation(); deleteGuide('v', i); }}
+            title={`Vertical guide @ x=${gx} — drag to move, double-click to delete`}
+          />
+        </React.Fragment>
+      );
+    });
+
+    guidesH.forEach((gy, i) => {
+      if (guideDrag && guideDrag.mode === 'move' && guideDrag.axis === 'h' && guideDrag.index === i) return;
+      const top = gy * zoom + panY;
+      const hi = activeSnapGuides.h === gy;
+      nodes.push(
+        <React.Fragment key={'gh' + i}>
+          <div style={{ position: 'absolute', top, left: 0, height: hi ? 2 : 1, width: '100%', background: hi ? guideActive : guideBase, pointerEvents: 'none' }} />
+          <div
+            style={{ position: 'absolute', top: top - 3.5, left: 0, height: 7, width: '100%', pointerEvents: 'auto', cursor: 'ns-resize' }}
+            onMouseDown={(e) => { if (e.button !== 0) return; e.preventDefault(); e.stopPropagation(); beginGuideDrag({ axis: 'h', mode: 'move', index: i }, e.clientX, e.clientY); }}
+            onDoubleClick={(e) => { e.stopPropagation(); deleteGuide('h', i); }}
+            title={`Horizontal guide @ y=${gy} — drag to move, double-click to delete`}
+          />
+        </React.Fragment>
+      );
+    });
+
+    if (guideDrag) {
+      const isV = guideDrag.axis === 'v';
+      const screen = isV ? guideDrag.pos * zoom + panX : guideDrag.pos * zoom + panY;
+      const col = guideDrag.remove ? 'rgba(244,63,94,0.9)' : guideActive;
+      nodes.push(
+        <div key="gdrag-line" style={isV
+          ? { position: 'absolute', left: screen, top: 0, width: 2, height: '100%', background: col, pointerEvents: 'none' }
+          : { position: 'absolute', top: screen, left: 0, height: 2, width: '100%', background: col, pointerEvents: 'none' }
+        } />
+      );
+      nodes.push(
+        <div key="gdrag-label" style={{
+          position: 'absolute',
+          left: isV ? screen + 4 : RULER_SIZE + 4,
+          top: isV ? RULER_SIZE + 4 : screen + 4,
+          background: 'rgba(0,0,0,0.82)', color: '#fff', fontSize: 10, padding: '1px 5px',
+          borderRadius: 3, pointerEvents: 'none', whiteSpace: 'nowrap', fontFamily: 'monospace',
+        }}>
+          {guideDrag.remove ? 'delete' : (isV ? `x: ${guideDrag.pos}` : `y: ${guideDrag.pos}`)}
+        </div>
+      );
+    }
+
+    return (
+      <div className="absolute inset-0" style={{ pointerEvents: 'none', zIndex: 100, overflow: 'hidden' }}>
+        {nodes}
+      </div>
+    );
+  };
+
   // Assign groupBounds now — renderElement (called during the return) reads this via closure.
   groupBounds = computeGroupBounds();
 
@@ -2360,6 +2695,21 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
                 <button onClick={() => onViewChange({...viewState, zoom: Math.min(5, viewState.zoom + 0.1)})} className="p-2 hover:bg-neutral-700 rounded text-neutral-300 hover:text-white transition-colors" title="Zoom In"><ZoomIn className="w-4 h-4" /></button>
                 <button onClick={() => onViewChange({...viewState, zoom: Math.max(0.1, viewState.zoom - 0.1)})} className="p-2 hover:bg-neutral-700 rounded text-neutral-300 hover:text-white transition-colors" title="Zoom Out"><ZoomOut className="w-4 h-4" /></button>
                 <button onClick={() => onViewChange({...viewState, showGrid: !viewState.showGrid})} className={`p-2 rounded transition-colors ${viewState.showGrid ? 'text-blue-400 bg-blue-900/20' : 'text-neutral-400 hover:text-white hover:bg-neutral-700'}`} title="Toggle Grid"><GridIcon className="w-4 h-4" /></button>
+                <button onClick={() => onViewChange({...viewState, showRulers: !showRulers})} className={`p-2 rounded transition-colors ${showRulers ? 'text-blue-400 bg-blue-900/20' : 'text-neutral-400 hover:text-white hover:bg-neutral-700'}`} title="Toggle Rulers"><Ruler className="w-4 h-4" /></button>
+                <button onClick={() => onViewChange({...viewState, snapToGuides: !snapToGuides})} className={`p-2 rounded transition-colors ${snapToGuides ? 'text-blue-400 bg-blue-900/20' : 'text-neutral-400 hover:text-white hover:bg-neutral-700'}`} title="Snap to Guides"><Magnet className="w-4 h-4" /></button>
+                <button
+                    onClick={clearGuides}
+                    disabled={guidesV.length + guidesH.length === 0}
+                    className="relative p-2 rounded transition-colors text-neutral-400 hover:text-white hover:bg-neutral-700 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-neutral-400"
+                    title={`Clear all guides (${guidesV.length + guidesH.length})`}
+                >
+                    <Eraser className="w-4 h-4" />
+                    {guidesV.length + guidesH.length > 0 && (
+                        <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-0.5 rounded-full bg-cyan-500 text-[9px] font-bold text-white flex items-center justify-center leading-none">
+                            {guidesV.length + guidesH.length}
+                        </span>
+                    )}
+                </button>
                 <div className="h-px bg-neutral-700 my-1"></div>
                 <button onClick={() => onViewChange({...viewState, zoom: 1, panX: 0, panY: 0})} className="p-2 hover:bg-neutral-700 rounded text-neutral-300 hover:text-white transition-colors text-xs font-bold" title="Reset View">1:1</button>
             </div>
@@ -2396,11 +2746,36 @@ const Canvas: React.FC<CanvasProps> = ({ state, viewState, onSelect, onToggleSel
                 )}
                 {groupBounds && renderMultiSelectBox(groupBounds)}
             </div>
+
+            {/* Transparent overlay that suppresses element hover/selection while a
+                guide is being dragged. */}
+            {guideDrag && (
+              <div className="absolute inset-0" style={{ zIndex: 90, cursor: guideDrag.axis === 'v' ? 'ew-resize' : 'ns-resize' }} />
+            )}
+
+            {/* Guides (screen-space cyan lines, above content, below rulers). */}
+            {renderGuidesOverlay()}
+
+            {/* Rulers overlay (top + left bands + corner toggle). */}
+            {showRulers && viewportSize.w > 0 && (
+              <CanvasRulers
+                width={viewportSize.w}
+                height={viewportSize.h}
+                zoom={viewState.zoom}
+                panX={viewState.panX}
+                panY={viewState.panY}
+                rulerSize={RULER_SIZE}
+                onToggleRulers={() => onViewChange({ ...viewState, showRulers: !showRulers })}
+                onStartGuide={handleStartGuideFromRuler}
+              />
+            )}
         </div>
-        
+
         <div className="h-6 bg-neutral-900 border-t border-neutral-800 flex items-center px-4 text-[10px] text-neutral-500 space-x-4 z-10">
             <span>Zoom: {Math.round(viewState.zoom * 100)}%</span>
             <span>Grid: {viewState.showGrid ? `${viewState.gridSize}px` : 'Off'}</span>
+            <span>Guides: {guidesV.length + guidesH.length}</span>
+            <span>Snap: {snapToGuides ? 'On' : 'Off'}</span>
         </div>
 
         {/* Right-click context menu — rendered last so it overlays everything. */}

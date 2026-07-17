@@ -30,3 +30,4 @@ dist-ssr
 .dev/
 .playwright-mcp/
 knowledge/
+.kb/

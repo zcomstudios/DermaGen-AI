@@ -40,7 +40,11 @@ const initialViewState: ViewState = {
     panX: 0,
     panY: 0,
     gridSize: 10,
-    showGrid: true
+    showGrid: true,
+    showRulers: true,
+    snapToGuides: true,
+    guidesV: [],
+    guidesH: []
 };
 
 const App: React.FC = () => {
@@ -76,7 +80,23 @@ const App: React.FC = () => {
             console.error("Failed to load state", e);
         }
     }
+    // Restore the view (rulers/guides/grid/zoom), merged over defaults so any
+    // field missing from older saved state falls back cleanly.
+    const savedView = localStorage.getItem('dermaGenViewState');
+    if (savedView) {
+        try {
+            const parsedView = JSON.parse(savedView);
+            setViewState({ ...initialViewState, ...parsedView });
+        } catch (e) {
+            console.error("Failed to load view state", e);
+        }
+    }
   }, []);
+
+  // Persist the view state (zoom/pan/grid/rulers/guides) across sessions.
+  useEffect(() => {
+    localStorage.setItem('dermaGenViewState', JSON.stringify(viewState));
+  }, [viewState]);
 
   useEffect(() => {
     localStorage.setItem('dermaGenState', JSON.stringify(currentState));

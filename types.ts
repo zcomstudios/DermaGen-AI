@@ -238,4 +238,12 @@ export interface ViewState {
   panY: number;
   gridSize: number;
   showGrid: boolean;
+
+  // Rulers + guides + snapping (Photoshop-style). All optional so older saved
+  // ViewState (localStorage / project files) stays valid; consumers normalize
+  // the defaults (showRulers=true, snapToGuides=true, guides=[]).
+  showRulers?: boolean;
+  snapToGuides?: boolean;
+  guidesV?: number[]; // vertical guides — x positions in root canvas space
+  guidesH?: number[]; // horizontal guides — y positions in root canvas space
 }
