@@ -31,3 +31,4 @@ dist-ssr
 .playwright-mcp/
 knowledge/
 .kb/
+Thumbs.db
